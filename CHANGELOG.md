@@ -7,12 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.1.0] - 2026-03-06
+
 ### Added
-- Complete README.md with full usage documentation
-- Enhanced .gitignore for Rust project
-- GitHub release workflow for cross-platform builds
+- SSH-config-based host discovery and import
+- Automatic shell type detection (sh, bash, zsh, PowerShell, cmd.exe)
+- System snapshots (CPU, memory, disk, battery metrics)
+- File synchronization with collect-decide-distribute model
+- Remote command execution (`run`, `exec`)
+- TUI for viewing historical data and trends
+- Operation logging with SQLite state database
+- Group-based host targeting
+- Cross-platform GitHub release workflow
 
 ### Documentation
-- Added detailed usage examples for all commands
-- Added configuration file example
-- Added target selection reference
+- Complete README with usage examples for all commands
+- Configuration file examples
+- Target selection reference
