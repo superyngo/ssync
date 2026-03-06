@@ -9,7 +9,7 @@ pub fn config_dir() -> Result<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
-        return Ok(home.join(".config").join("ssync"));
+        Ok(home.join(".config").join("ssync"))
     }
     #[cfg(target_os = "windows")]
     {
@@ -52,8 +52,7 @@ pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
-    let content =
-        toml::to_string_pretty(config).context("Failed to serialize config")?;
+    let content = toml::to_string_pretty(config).context("Failed to serialize config")?;
     let content = inject_config_comments(&content);
     std::fs::write(&path, content)
         .with_context(|| format!("Failed to write {}", path.display()))?;

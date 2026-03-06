@@ -46,7 +46,7 @@ pub async fn run(
         println!("[dry-run] Script: {}", script);
         println!("[dry-run] Compatible shell: {:?}", compatible_shell);
         for host in &hosts {
-            let compat = compatible_shell.map_or(true, |s| s == host.shell);
+            let compat = compatible_shell.is_none_or(|s| s == host.shell);
             if compat {
                 printer::print_host_line(&host.name, "ok", "would execute");
             } else {
@@ -64,7 +64,10 @@ pub async fn run(
                 printer::print_host_line(
                     &host.name,
                     "skip",
-                    &format!("skipped (shell mismatch: need {}, have {})", required, host.shell),
+                    &format!(
+                        "skipped (shell mismatch: need {}, have {})",
+                        required, host.shell
+                    ),
                 );
                 summary.add_skip();
                 continue;
@@ -75,8 +78,6 @@ pub async fn run(
         let host = (*host).clone();
         let script_path = script_path.to_path_buf();
         let timeout = ctx.timeout;
-        let keep = keep;
-        let sudo = sudo;
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -136,9 +137,7 @@ async fn exec_on_host(
         .unwrap_or("ssync_script");
 
     // Use mktemp-style unique name
-    let remote_path = format!(
-        "{}/ssync_{}_{}", temp_dir, std::process::id(), script_name
-    );
+    let remote_path = format!("{}/ssync_{}_{}", temp_dir, std::process::id(), script_name);
 
     // Quote the path for shells that need it (PowerShell)
     let remote_path_quoted = if host.shell == ShellType::PowerShell {
@@ -183,30 +182,37 @@ async fn exec_on_host(
     if output.success {
         Ok(output.stdout)
     } else {
-        bail!("Script failed (exit {}): {}", output.exit_code.unwrap_or(-1), output.stderr.trim());
+        bail!(
+            "Script failed (exit {}): {}",
+            output.exit_code.unwrap_or(-1),
+            output.stderr.trim()
+        );
     }
 }
 
-async fn get_expanded_temp_dir(host: &crate::config::schema::HostEntry, timeout: u64) -> Result<String> {
+async fn get_expanded_temp_dir(
+    host: &crate::config::schema::HostEntry,
+    timeout: u64,
+) -> Result<String> {
     let temp_dir = shell::temp_dir(host.shell);
-    
+
     // For sh, /tmp is already a literal path
     if host.shell == ShellType::Sh {
         return Ok(temp_dir.to_string());
     }
-    
+
     // For PowerShell and Cmd, need to expand the variable
     let echo_cmd = match host.shell {
-        ShellType::PowerShell => format!("echo $env:TEMP"),
-        ShellType::Cmd => format!("echo %TEMP%"),
+        ShellType::PowerShell => "echo $env:TEMP".to_string(),
+        ShellType::Cmd => "echo %TEMP%".to_string(),
         ShellType::Sh => unreachable!(),
     };
-    
+
     let output = executor::run_remote(host, &echo_cmd, timeout).await?;
-    
+
     if !output.success {
         bail!("Failed to get temp directory: {}", output.stderr.trim());
     }
-    
+
     Ok(output.stdout.trim().to_string())
 }

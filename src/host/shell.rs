@@ -19,8 +19,10 @@ pub async fn detect(host_ssh: &str, timeout_secs: u64) -> Result<ShellType> {
     let output = tokio::time::timeout(
         timeout,
         Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg(format!("ConnectTimeout={}", timeout_secs))
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", timeout_secs))
             .arg(host_ssh)
             .arg("--")
             .arg("uname -s 2>/dev/null || echo __NOT_SH__")
@@ -54,8 +56,10 @@ pub async fn detect(host_ssh: &str, timeout_secs: u64) -> Result<ShellType> {
     let output = tokio::time::timeout(
         timeout,
         Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg(format!("ConnectTimeout={}", timeout_secs))
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", timeout_secs))
             .arg(host_ssh)
             .arg("--")
             .arg("powershell -Command \"echo POWERSHELL_OK\"")
@@ -83,8 +87,10 @@ pub async fn detect(host_ssh: &str, timeout_secs: u64) -> Result<ShellType> {
     let output = tokio::time::timeout(
         timeout,
         Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg(format!("ConnectTimeout={}", timeout_secs))
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", timeout_secs))
             .arg(host_ssh)
             .arg("--")
             .arg("ver")
@@ -114,7 +120,14 @@ pub async fn detect(host_ssh: &str, timeout_secs: u64) -> Result<ShellType> {
     }
 
     // Host unreachable — return error so init skips it
-    anyhow::bail!("host unreachable: {}", if last_error.is_empty() { "SSH connection failed" } else { &last_error })
+    anyhow::bail!(
+        "host unreachable: {}",
+        if last_error.is_empty() {
+            "SSH connection failed"
+        } else {
+            &last_error
+        }
+    )
 }
 
 /// Get the temporary directory path for a given shell type.
@@ -131,7 +144,10 @@ pub fn sudo_wrap(shell: ShellType, command: &str) -> String {
     match shell {
         ShellType::Sh => format!("sudo {}", command),
         ShellType::PowerShell => {
-            format!("Start-Process powershell -ArgumentList '-Command {}' -Verb RunAs", command)
+            format!(
+                "Start-Process powershell -ArgumentList '-Command {}' -Verb RunAs",
+                command
+            )
         }
         ShellType::Cmd => format!("runas /user:Administrator \"{}\"", command),
     }

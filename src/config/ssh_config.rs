@@ -1,4 +1,3 @@
-
 use anyhow::{Context, Result};
 
 /// A parsed SSH host entry from ~/.ssh/config.

@@ -14,8 +14,10 @@ use super::Context;
 #[derive(Debug, Clone)]
 struct FileInfo {
     host: String,
+    #[allow(dead_code)]
     path: String,
     mtime: i64,
+    #[allow(dead_code)]
     size: u64,
     hash: String,
 }
@@ -37,7 +39,12 @@ struct SyncDecision {
     reason: String,
 }
 
-pub async fn run(ctx: &Context, dry_run: bool, files: &[String], no_push_missing: bool) -> Result<()> {
+pub async fn run(
+    ctx: &Context,
+    dry_run: bool,
+    files: &[String],
+    no_push_missing: bool,
+) -> Result<()> {
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
 
@@ -49,7 +56,16 @@ pub async fn run(ctx: &Context, dry_run: bool, files: &[String], no_push_missing
             // If the shell expanded ~/path to an absolute path under $HOME, convert it back
             // so the same tilde-relative path is used consistently on all remote hosts.
             let tilde_path = to_tilde_path(path);
-            sync_path_across(ctx, &hosts, &tilde_path, "ad-hoc", dry_run, push_missing, &mut total_summary).await?;
+            sync_path_across(
+                ctx,
+                &hosts,
+                &tilde_path,
+                "ad-hoc",
+                dry_run,
+                push_missing,
+                &mut total_summary,
+            )
+            .await?;
         }
         total_summary.print();
         return Ok(());
@@ -66,7 +82,11 @@ pub async fn run(ctx: &Context, dry_run: bool, files: &[String], no_push_missing
     match &ctx.mode {
         // --all or --host: process [[sync.file]] entries without groups
         super::TargetMode::All | super::TargetMode::Hosts(_) => {
-            let files: Vec<_> = ctx.config.sync.file.iter()
+            let files: Vec<_> = ctx
+                .config
+                .sync
+                .file
+                .iter()
                 .filter(|f| f.groups.is_empty())
                 .collect();
             if files.is_empty() {
@@ -80,18 +100,34 @@ pub async fn run(ctx: &Context, dry_run: bool, files: &[String], no_push_missing
             println!("\n── Sync: global ──");
             for sync_file in files {
                 for path in &sync_file.paths {
-                    sync_path_across(ctx, &hosts, path, "global", dry_run, push_missing, &mut total_summary).await?;
+                    sync_path_across(
+                        ctx,
+                        &hosts,
+                        path,
+                        "global",
+                        dry_run,
+                        push_missing,
+                        &mut total_summary,
+                    )
+                    .await?;
                 }
             }
         }
 
         // --group: process [[sync.file]] entries whose groups intersect
         super::TargetMode::Groups(groups) => {
-            let files: Vec<_> = ctx.config.sync.file.iter()
+            let files: Vec<_> = ctx
+                .config
+                .sync
+                .file
+                .iter()
                 .filter(|f| !f.groups.is_empty() && f.groups.iter().any(|g| groups.contains(g)))
                 .collect();
             if files.is_empty() {
-                println!("No [[sync.file]] configured for group(s): {}", groups.join(", "));
+                println!(
+                    "No [[sync.file]] configured for group(s): {}",
+                    groups.join(", ")
+                );
                 return Ok(());
             }
             if hosts.len() < 2 {
@@ -102,7 +138,16 @@ pub async fn run(ctx: &Context, dry_run: bool, files: &[String], no_push_missing
             println!("\n── Sync group: {} ──", label);
             for sync_file in files {
                 for path in &sync_file.paths {
-                    sync_path_across(ctx, &hosts, path, &label, dry_run, push_missing, &mut total_summary).await?;
+                    sync_path_across(
+                        ctx,
+                        &hosts,
+                        path,
+                        &label,
+                        dry_run,
+                        push_missing,
+                        &mut total_summary,
+                    )
+                    .await?;
                 }
             }
         }
@@ -123,13 +168,7 @@ async fn sync_path_across(
     summary: &mut Summary,
 ) -> Result<()> {
     // Stage 1: Collect metadata from all hosts
-    let collect_result = collect_file_metadata(
-        hosts,
-        path,
-        ctx.timeout,
-        ctx.concurrency(),
-    )
-    .await?;
+    let collect_result = collect_file_metadata(hosts, path, ctx.timeout, ctx.concurrency()).await?;
 
     if collect_result.found.is_empty() {
         if !collect_result.missing.is_empty() {
@@ -179,14 +218,7 @@ async fn sync_path_across(
 
     // Stage 3: Distribute via local relay
     for decision in &decisions {
-        match distribute(
-            hosts,
-            decision,
-            ctx.timeout,
-            ctx.concurrency(),
-        )
-        .await
-        {
+        match distribute(hosts, decision, ctx.timeout, ctx.concurrency()).await {
             Ok((succeeded, failed)) => {
                 if !succeeded.is_empty() {
                     printer::print_host_line(
@@ -219,11 +251,7 @@ async fn sync_path_across(
                 }
 
                 for (target, err) in &failed {
-                    printer::print_host_line(
-                        target,
-                        "error",
-                        &format!("upload failed: {}", err),
-                    );
+                    printer::print_host_line(target, "error", &format!("upload failed: {}", err));
                     summary.add_failure(target, err);
                 }
 
@@ -270,8 +298,8 @@ async fn collect_file_metadata(
             let cmd = match host.shell {
                 ShellType::PowerShell => {
                     // Expand ~/path to $HOME\path for PowerShell (use double-quotes for $HOME expansion)
-                    let ps_path = if path.starts_with("~/") {
-                        format!("$HOME\\{}", &path[2..].replace('/', "\\"))
+                    let ps_path = if let Some(stripped) = path.strip_prefix("~/") {
+                        format!("$HOME\\{}", stripped.replace('/', "\\"))
                     } else {
                         path.clone()
                     };
@@ -287,8 +315,8 @@ async fn collect_file_metadata(
                 }
                 ShellType::Sh | ShellType::Cmd => {
                     // Handle ~ expansion: $HOME must stay unquoted for shell expansion
-                    let escaped = if path.starts_with("~/") {
-                        format!("$HOME/'{}'", path[2..].replace('\'', "'\\''"))
+                    let escaped = if let Some(stripped) = path.strip_prefix("~/") {
+                        format!("$HOME/'{}'", stripped.replace('\'', "'\\''"))
                     } else {
                         format!("'{}'", path.replace('\'', "'\\''"))
                     };
@@ -406,9 +434,13 @@ fn make_decisions(
                 .iter()
                 .filter(|f| f.host != source.host && f.hash != source.hash)
                 .collect();
-            let reason = if conflict_targets.is_empty() && push_missing && !missing_hosts.is_empty() {
+            let reason = if conflict_targets.is_empty() && push_missing && !missing_hosts.is_empty()
+            {
                 // All reachable hosts are in sync; only pushing to hosts that lack the file
-                format!("in sync on reachable hosts, pushing to {} missing", missing_hosts.len())
+                format!(
+                    "in sync on reachable hosts, pushing to {} missing",
+                    missing_hosts.len()
+                )
             } else {
                 let mut r = format!("newest mtime: {}", source.mtime);
                 if push_missing && !missing_hosts.is_empty() {
@@ -434,8 +466,7 @@ fn make_decisions(
         }
         ConflictStrategy::Skip => {
             // Check if there's a conflict (different hashes)
-            let hashes: std::collections::HashSet<_> =
-                file_infos.iter().map(|f| &f.hash).collect();
+            let hashes: std::collections::HashSet<_> = file_infos.iter().map(|f| &f.hash).collect();
             if hashes.len() > 1 {
                 tracing::warn!(
                     path = %path,
@@ -447,11 +478,8 @@ fn make_decisions(
             // Even with skip strategy, push to missing hosts if all found are in sync
             if push_missing && !missing_hosts.is_empty() && all_in_sync {
                 let source = &file_infos[0];
-                let synced_hosts: Vec<String> = file_infos
-                    .iter()
-                    .skip(1)
-                    .map(|f| f.host.clone())
-                    .collect();
+                let synced_hosts: Vec<String> =
+                    file_infos.iter().skip(1).map(|f| f.host.clone()).collect();
                 return vec![SyncDecision {
                     path: path.to_string(),
                     source_host: source.host.clone(),

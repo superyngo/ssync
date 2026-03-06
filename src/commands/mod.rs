@@ -34,11 +34,16 @@ pub struct Context {
     pub timeout: u64,
     pub mode: TargetMode,
     pub serial: bool,
+    #[allow(dead_code)]
     pub verbose: bool,
 }
 
 impl Context {
-    pub async fn new(verbose: bool, target: &TargetArgs, config_path: Option<&Path>) -> Result<Self> {
+    pub async fn new(
+        verbose: bool,
+        target: &TargetArgs,
+        config_path: Option<&Path>,
+    ) -> Result<Self> {
         let config = crate::config::app::load(config_path)?.unwrap_or_default();
         let db = crate::state::db::open(config.settings.state_dir.as_deref())?;
         let timeout = target.timeout.unwrap_or(config.settings.default_timeout);
@@ -77,16 +82,18 @@ impl Context {
     pub fn resolve_hosts(&self) -> Result<Vec<&HostEntry>> {
         let hosts: Vec<&HostEntry> = match &self.mode {
             TargetMode::All => self.config.host.iter().collect(),
-            TargetMode::Hosts(names) => {
-                self.config.host.iter()
-                    .filter(|h| names.contains(&h.name))
-                    .collect()
-            }
-            TargetMode::Groups(groups) => {
-                self.config.host.iter()
-                    .filter(|h| h.groups.iter().any(|g| groups.contains(g)))
-                    .collect()
-            }
+            TargetMode::Hosts(names) => self
+                .config
+                .host
+                .iter()
+                .filter(|h| names.contains(&h.name))
+                .collect(),
+            TargetMode::Groups(groups) => self
+                .config
+                .host
+                .iter()
+                .filter(|h| h.groups.iter().any(|g| groups.contains(g)))
+                .collect(),
         };
 
         if hosts.is_empty() {
@@ -118,7 +125,7 @@ fn resolve_target_mode(target: &TargetArgs, config: &AppConfig) -> Result<Target
 
     if count == 0 {
         let mut hint = String::from(
-            "Target required. Use --group/-g, --host/-h, or --all/-a to specify targets."
+            "Target required. Use --group/-g, --host/-h, or --all/-a to specify targets.",
         );
         if config.host.is_empty() {
             hint.push_str("\nHint: Run 'ssync init' first to import hosts from ~/.ssh/config.");

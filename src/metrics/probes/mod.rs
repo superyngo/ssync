@@ -1,6 +1,6 @@
-pub mod sh;
-pub mod powershell;
 pub mod cmd;
+pub mod powershell;
+pub mod sh;
 
 use crate::config::schema::ShellType;
 
@@ -18,7 +18,10 @@ pub fn path_size_command(shell: ShellType, path: &str) -> String {
     match shell {
         ShellType::Sh => format!("du -sb {} 2>/dev/null", path),
         ShellType::PowerShell => {
-            format!("(Get-ChildItem -Recurse -File '{}' | Measure-Object -Property Length -Sum).Sum", path)
+            format!(
+                "(Get-ChildItem -Recurse -File '{}' | Measure-Object -Property Length -Sum).Sum",
+                path
+            )
         }
         ShellType::Cmd => format!("dir /s /a \"{}\" 2>nul", path),
     }

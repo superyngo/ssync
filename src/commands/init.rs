@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tokio::sync::Semaphore;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::config::schema::HostEntry;
 use crate::config::ssh_config;
@@ -31,7 +31,10 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         .chain(skip.iter().cloned())
         .collect();
 
-    println!("Found {} host(s). Detecting shell types...", ssh_hosts.len());
+    println!(
+        "Found {} host(s). Detecting shell types...",
+        ssh_hosts.len()
+    );
 
     let mut new_hosts: Vec<HostEntry> = Vec::new();
     let mut summary = Summary::default();
@@ -67,11 +70,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         let (host_name, shell_result) = handle.await?;
         match shell_result {
             Ok(shell_type) => {
-                printer::print_host_line(
-                    &host_name,
-                    "ok",
-                    &format!("detected: {}", shell_type),
-                );
+                printer::print_host_line(&host_name, "ok", &format!("detected: {}", shell_type));
                 new_hosts.push(HostEntry {
                     name: host_name.clone(),
                     ssh_host: host_name,

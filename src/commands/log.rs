@@ -47,7 +47,8 @@ pub async fn run(
     query.push_str(&format!(" LIMIT {}", last));
 
     let mut stmt = ctx.db.prepare(&query)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = bind_values.iter().map(|b| b.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        bind_values.iter().map(|b| b.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         let ts: i64 = row.get(0)?;
         let command: String = row.get(1)?;
@@ -80,7 +81,8 @@ pub async fn run(
         };
 
         println!(
-            "{} {} [{}] {} {}{}{}", time, status_icon, host, command, action, duration, note_str
+            "{} {} [{}] {} {}{}{}",
+            time, status_icon, host, command, action, duration, note_str
         );
         count += 1;
     }

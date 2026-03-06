@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ssync", version, about = "SSH-config-based cross-platform remote management tool")]
+#[command(
+    name = "ssync",
+    version,
+    about = "SSH-config-based cross-platform remote management tool"
+)]
 pub struct Cli {
     /// Enable verbose output
     #[arg(short = 'v', long)]

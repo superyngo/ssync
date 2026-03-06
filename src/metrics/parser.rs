@@ -112,16 +112,25 @@ fn parse_sh_disk(stdout: &str) -> Value {
 fn parse_sh_cpu_load(stdout: &str) -> Value {
     let mut map = serde_json::Map::new();
     // /proc/loadavg: "0.52 0.38 0.21 1/234 5678"
-    let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
     if parts.len() >= 3 {
         if let Ok(v) = parts[0].parse::<f64>() {
-            map.insert("load1".to_string(), Value::Number(serde_json::Number::from_f64(v).unwrap_or(0.into())));
+            map.insert(
+                "load1".to_string(),
+                Value::Number(serde_json::Number::from_f64(v).unwrap_or(0.into())),
+            );
         }
         if let Ok(v) = parts[1].parse::<f64>() {
-            map.insert("load5".to_string(), Value::Number(serde_json::Number::from_f64(v).unwrap_or(0.into())));
+            map.insert(
+                "load5".to_string(),
+                Value::Number(serde_json::Number::from_f64(v).unwrap_or(0.into())),
+            );
         }
         if let Ok(v) = parts[2].parse::<f64>() {
-            map.insert("load15".to_string(), Value::Number(serde_json::Number::from_f64(v).unwrap_or(0.into())));
+            map.insert(
+                "load15".to_string(),
+                Value::Number(serde_json::Number::from_f64(v).unwrap_or(0.into())),
+            );
         }
     }
     Value::Object(map)

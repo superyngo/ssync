@@ -113,7 +113,11 @@ pub async fn run(ctx: &Context) -> Result<()> {
                     printer::print_host_line(
                         &host.name,
                         "ok",
-                        &format!("collected ({} metrics, {:.1}s)", cr.succeeded, elapsed.as_secs_f64()),
+                        &format!(
+                            "collected ({} metrics, {:.1}s)",
+                            cr.succeeded,
+                            elapsed.as_secs_f64()
+                        ),
                     );
                     summary.add_success();
                 }

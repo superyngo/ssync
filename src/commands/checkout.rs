@@ -102,7 +102,10 @@ fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<Host
 }
 
 fn extract_cpu_load(data: &serde_json::Value) -> String {
-    let v = match data.get("cpu_load") { Some(v) => v, None => return "-".to_string() };
+    let v = match data.get("cpu_load") {
+        Some(v) => v,
+        None => return "-".to_string(),
+    };
 
     // Sh format: {load1: f, load5: f, load15: f}
     if let Some(obj) = v.as_object() {
@@ -118,12 +121,17 @@ fn extract_cpu_load(data: &serde_json::Value) -> String {
             return format!("{:.2}", f);
         }
     }
-    if let Some(f) = v.as_f64() { return format!("{:.2}", f); }
+    if let Some(f) = v.as_f64() {
+        return format!("{:.2}", f);
+    }
     "-".to_string()
 }
 
 fn extract_memory(data: &serde_json::Value) -> (String, bool) {
-    let v = match data.get("memory") { Some(v) => v, None => return ("-".to_string(), false) };
+    let v = match data.get("memory") {
+        Some(v) => v,
+        None => return ("-".to_string(), false),
+    };
 
     // Sh format: {total_bytes, used_bytes}
     if let (Some(total), Some(used)) = (
@@ -153,11 +161,15 @@ fn extract_memory(data: &serde_json::Value) -> (String, bool) {
 }
 
 fn extract_disk(data: &serde_json::Value) -> (String, bool) {
-    let v = match data.get("disk") { Some(v) => v, None => return ("-".to_string(), false) };
+    let v = match data.get("disk") {
+        Some(v) => v,
+        None => return ("-".to_string(), false),
+    };
 
     // Sh format: [{total_bytes, used_bytes, mount}, ...]
     if let Some(arr) = v.as_array() {
-        let entry = arr.iter()
+        let entry = arr
+            .iter()
             .find(|e| e.get("mount").and_then(|m| m.as_str()) == Some("/"))
             .or_else(|| arr.iter().find(|e| e.get("total_bytes").is_some()));
         if let Some(e) = entry {
@@ -227,21 +239,33 @@ fn format_relative_time(ts: i64) -> String {
 fn print_table_report(snapshots: &[HostSnapshot]) {
     // Header
     println!(
-        "{:<16} {:<12} {:<10} {:<8} {:<8} {:<8} {}",
-        "Host", "Status", "CPU Load", "Memory", "Disk", "Battery", "Last Seen"
+        "{:<16} {:<12} {:<10} {:<8} {:<8} {:<8} Last Seen",
+        "Host", "Status", "CPU Load", "Memory", "Disk", "Battery"
     );
     println!("{}", "-".repeat(78));
 
     for snap in snapshots {
-        let status = if snap.online { "\x1b[32m✓ online\x1b[0m" } else { "\x1b[31m✗ offline\x1b[0m" };
+        let status = if snap.online {
+            "\x1b[32m✓ online\x1b[0m"
+        } else {
+            "\x1b[31m✗ offline\x1b[0m"
+        };
         let cpu = extract_cpu_load(&snap.data);
         let (mem, mem_crit) = extract_memory(&snap.data);
         let (disk, disk_crit) = extract_disk(&snap.data);
         let bat = extract_battery(&snap.data);
         let last_seen = format_relative_time(snap.collected_at);
 
-        let mem_str = if mem_crit { format!("\x1b[31m{}\x1b[0m", mem) } else { mem };
-        let disk_str = if disk_crit { format!("\x1b[31m{}\x1b[0m", disk) } else { disk };
+        let mem_str = if mem_crit {
+            format!("\x1b[31m{}\x1b[0m", mem)
+        } else {
+            mem
+        };
+        let disk_str = if disk_crit {
+            format!("\x1b[31m{}\x1b[0m", disk)
+        } else {
+            disk
+        };
 
         println!(
             "{:<16} {:<20} {:<10} {:<16} {:<16} {:<8} {}",
@@ -275,7 +299,10 @@ fn build_json_report(
                 .filter_map(|r| r.ok())
                 .map(|(ts, online, json_str)| {
                     let mut entry = serde_json::Map::new();
-                    entry.insert("collected_at".to_string(), serde_json::Value::Number(ts.into()));
+                    entry.insert(
+                        "collected_at".to_string(),
+                        serde_json::Value::Number(ts.into()),
+                    );
                     entry.insert("online".to_string(), serde_json::Value::Bool(online));
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
                         entry.insert("data".to_string(), v);
@@ -300,7 +327,10 @@ fn build_json_report(
             match entry {
                 Ok((ts, online, json_str)) => {
                     let mut map = serde_json::Map::new();
-                    map.insert("collected_at".to_string(), serde_json::Value::Number(ts.into()));
+                    map.insert(
+                        "collected_at".to_string(),
+                        serde_json::Value::Number(ts.into()),
+                    );
                     map.insert("online".to_string(), serde_json::Value::Bool(online));
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
                         map.insert("data".to_string(), v);
@@ -337,7 +367,10 @@ fn parse_since(since: Option<&str>) -> Result<i64> {
             if let Ok(dt) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
                 return Ok(dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp());
             }
-            bail!("Invalid --since value: {}. Use '7d', '24h', or 'YYYY-MM-DD'", s);
+            bail!(
+                "Invalid --since value: {}. Use '7d', '24h', or 'YYYY-MM-DD'",
+                s
+            );
         }
     }
 }
@@ -394,7 +427,11 @@ fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
 
             let mut rows = Vec::new();
             for snap in snapshots {
-                let status = if snap.online { "✓ online" } else { "✗ offline" };
+                let status = if snap.online {
+                    "✓ online"
+                } else {
+                    "✗ offline"
+                };
                 let cpu = extract_cpu_load(&snap.data);
                 let (mem, mem_crit) = extract_memory(&snap.data);
                 let (disk, disk_crit) = extract_disk(&snap.data);
@@ -441,8 +478,16 @@ fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
                 ],
             )
             .header(
-                Row::new(vec!["Host", "Status", "CPU Load", "Memory", "Disk", "Battery", "Last Seen"])
-                    .style(Style::new().bold()),
+                Row::new(vec![
+                    "Host",
+                    "Status",
+                    "CPU Load",
+                    "Memory",
+                    "Disk",
+                    "Battery",
+                    "Last Seen",
+                ])
+                .style(Style::new().bold()),
             )
             .block(Block::bordered().title(" ssync checkout — press q to quit "));
 

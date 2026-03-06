@@ -2,6 +2,7 @@ use crate::config::schema::HostEntry;
 
 /// Filter hosts based on CLI parameters.
 /// Matches groups from host[].groups tags.
+#[allow(dead_code)]
 pub fn filter_hosts<'a>(
     hosts: &'a [HostEntry],
     groups: &[String],

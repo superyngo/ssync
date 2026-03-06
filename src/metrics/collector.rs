@@ -1,9 +1,9 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use super::probes;
 use crate::config::schema::HostEntry;
 use crate::host::executor;
-use super::probes;
 
 /// Result of metric collection with success/failure tracking.
 pub struct CollectionResult {
