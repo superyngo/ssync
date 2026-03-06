@@ -12,7 +12,7 @@ use crate::output::summary::Summary;
 use super::Context;
 
 pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result<()> {
-    let hosts = ctx.require_targets()?;
+    let hosts = ctx.resolve_hosts()?;
     let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
     let mut summary = Summary::default();
 

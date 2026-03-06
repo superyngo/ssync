@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -31,6 +33,15 @@ pub struct Settings {
 
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
+
+    /// Hosts to skip during init (persisted across re-init)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_hosts: Vec<String>,
+
+    /// Override the state directory (where ssync.db is stored).
+    /// Default: ~/.local/state/ssync (Linux/macOS) or %LOCALAPPDATA%/ssync (Windows)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dir: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -41,6 +52,8 @@ impl Default for Settings {
             conflict_strategy: default_conflict_strategy(),
             propagate_deletes: false,
             max_concurrency: default_concurrency(),
+            skipped_hosts: Vec::new(),
+            state_dir: None,
         }
     }
 }
@@ -111,20 +124,15 @@ pub struct CheckPath {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SyncConfig {
     #[serde(default)]
-    pub group: Vec<SyncGroup>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncGroup {
-    pub name: String,
-    pub hosts: Vec<String>,
-    #[serde(default)]
     pub file: Vec<SyncFile>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncFile {
-    pub path: String,
+    pub paths: Vec<String>,
+    /// Groups this file applies to. Empty = applies to --all/--host scope.
+    #[serde(default)]
+    pub groups: Vec<String>,
     #[serde(default)]
     pub recursive: bool,
     pub mode: Option<String>,

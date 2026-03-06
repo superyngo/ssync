@@ -10,7 +10,7 @@ use crate::output::summary::Summary;
 
 use super::Context;
 
-pub async fn run(ctx: &Context, update: bool, dry_run: bool) -> Result<()> {
+pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) -> Result<()> {
     println!("Scanning ~/.ssh/config...");
     let ssh_hosts = ssh_config::parse_ssh_config()?;
 
@@ -18,6 +18,18 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool) -> Result<()> {
         println!("No hosts found in ~/.ssh/config");
         return Ok(());
     }
+
+    // When config already exists, default to update behavior
+    let config_exists = crate::config::app::resolve_path(ctx.config_path.as_deref())?.exists();
+    let effective_update = update || config_exists;
+
+    // Merge CLI --skip with persisted skipped_hosts
+    let persisted_skips = &ctx.config.settings.skipped_hosts;
+    let all_skips: Vec<String> = persisted_skips
+        .iter()
+        .cloned()
+        .chain(skip.iter().cloned())
+        .collect();
 
     println!("Found {} host(s). Detecting shell types...", ssh_hosts.len());
 
@@ -27,9 +39,16 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool) -> Result<()> {
 
     let mut handles = Vec::new();
     for ssh_host in &ssh_hosts {
+        // Skip hosts from --skip and persisted skipped_hosts
+        if all_skips.iter().any(|s| s == &ssh_host.name) {
+            printer::print_host_line(&ssh_host.name, "skip", "skipped");
+            summary.add_skip();
+            continue;
+        }
+
         // Skip if already exists and not updating
         let already_exists = ctx.config.host.iter().any(|h| h.ssh_host == ssh_host.name);
-        if already_exists && !update {
+        if already_exists && !effective_update {
             continue;
         }
 
@@ -57,11 +76,12 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool) -> Result<()> {
                     name: host_name.clone(),
                     ssh_host: host_name,
                     shell: shell_type,
-                    groups: vec!["all".to_string()],
+                    groups: Vec::new(),
                 });
                 summary.add_success();
             }
             Err(e) => {
+                // Failed hosts are NOT registered into config
                 printer::print_host_line(&host_name, "error", &format!("{}", e));
                 summary.add_failure(&host_name, &e.to_string());
             }
@@ -75,13 +95,13 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    if new_hosts.is_empty() {
+    if new_hosts.is_empty() && skip.is_empty() {
         println!("No new hosts to add.");
         return Ok(());
     }
 
     // Merge with existing config
-    let mut config = crate::config::app::load()?.unwrap_or_default();
+    let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
     for host in new_hosts {
         if let Some(existing) = config.host.iter_mut().find(|h| h.ssh_host == host.ssh_host) {
             existing.shell = host.shell;
@@ -90,8 +110,16 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool) -> Result<()> {
         }
     }
 
-    crate::config::app::save(&config)?;
-    println!("\nConfig saved to {}", crate::config::app::config_path()?.display());
+    // Persist newly skipped hosts (deduplicated)
+    for s in &skip {
+        if !config.settings.skipped_hosts.contains(s) {
+            config.settings.skipped_hosts.push(s.clone());
+        }
+    }
+
+    crate::config::app::save(&config, ctx.config_path.as_deref())?;
+    let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
+    println!("\nConfig saved to {}", saved_path.display());
 
     Ok(())
 }

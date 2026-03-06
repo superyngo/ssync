@@ -12,7 +12,7 @@ use crate::state::retention;
 use super::Context;
 
 pub async fn run(ctx: &Context) -> Result<()> {
-    let hosts = ctx.require_targets()?;
+    let hosts = ctx.resolve_hosts()?;
 
     let check_paths: Vec<(String, String)> = ctx
         .config
@@ -48,32 +48,78 @@ pub async fn run(ctx: &Context) -> Result<()> {
         let now = chrono::Utc::now().timestamp();
 
         match result {
-            Ok(json_value) => {
-                let metric_count = json_value.as_object().map(|m| m.len()).unwrap_or(0);
-                let json_str = serde_json::to_string(&json_value)?;
+            Ok(cr) => {
+                let json_str = serde_json::to_string(&cr.data)?;
 
-                // Store snapshot
-                ctx.db.execute(
-                    "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 1, ?3)",
-                    rusqlite::params![host.name, now, json_str],
-                )?;
+                if cr.succeeded == 0 {
+                    // All metrics failed — treat as offline
+                    ctx.db.execute(
+                        "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 0, ?3)",
+                        rusqlite::params![host.name, now, json_str],
+                    )?;
 
-                // Update last seen
-                ctx.db.execute(
-                    "INSERT INTO host_last_seen (host, last_seen, last_online) VALUES (?1, ?2, ?2) \
-                     ON CONFLICT(host) DO UPDATE SET last_seen = ?2, last_online = ?2",
-                    rusqlite::params![host.name, now],
-                )?;
+                    ctx.db.execute(
+                        "INSERT INTO host_last_seen (host, last_seen, last_online) VALUES (?1, ?2, 0) \
+                         ON CONFLICT(host) DO UPDATE SET last_seen = ?2",
+                        rusqlite::params![host.name, now],
+                    )?;
 
-                printer::print_host_line(
-                    &host.name,
-                    "ok",
-                    &format!("collected ({} metrics, {:.1}s)", metric_count, elapsed.as_secs_f64()),
-                );
-                summary.add_success();
+                    let err_detail = cr.errors.first().map(|s| s.as_str()).unwrap_or("unknown");
+                    printer::print_host_line(
+                        &host.name,
+                        "error",
+                        &format!("failed ({:.1}s) — {}", elapsed.as_secs_f64(), err_detail),
+                    );
+                    summary.add_failure(&host.name, err_detail);
+                } else if cr.failed > 0 {
+                    // Partial success — online but with warnings
+                    ctx.db.execute(
+                        "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 1, ?3)",
+                        rusqlite::params![host.name, now, json_str],
+                    )?;
+
+                    ctx.db.execute(
+                        "INSERT INTO host_last_seen (host, last_seen, last_online) VALUES (?1, ?2, ?2) \
+                         ON CONFLICT(host) DO UPDATE SET last_seen = ?2, last_online = ?2",
+                        rusqlite::params![host.name, now],
+                    )?;
+
+                    let warn_detail = cr.errors.first().map(|s| s.as_str()).unwrap_or("unknown");
+                    printer::print_host_line(
+                        &host.name,
+                        "skip",
+                        &format!(
+                            "partial ({}/{} metrics, {:.1}s) — warn: {}",
+                            cr.succeeded,
+                            cr.succeeded + cr.failed,
+                            elapsed.as_secs_f64(),
+                            warn_detail,
+                        ),
+                    );
+                    summary.add_success();
+                } else {
+                    // Full success
+                    ctx.db.execute(
+                        "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 1, ?3)",
+                        rusqlite::params![host.name, now, json_str],
+                    )?;
+
+                    ctx.db.execute(
+                        "INSERT INTO host_last_seen (host, last_seen, last_online) VALUES (?1, ?2, ?2) \
+                         ON CONFLICT(host) DO UPDATE SET last_seen = ?2, last_online = ?2",
+                        rusqlite::params![host.name, now],
+                    )?;
+
+                    printer::print_host_line(
+                        &host.name,
+                        "ok",
+                        &format!("collected ({} metrics, {:.1}s)", cr.succeeded, elapsed.as_secs_f64()),
+                    );
+                    summary.add_success();
+                }
             }
             Err(e) => {
-                // Record offline
+                // SSH connection itself failed
                 ctx.db.execute(
                     "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 0, '{}')",
                     rusqlite::params![host.name, now],

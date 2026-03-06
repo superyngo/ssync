@@ -1,0 +1,19 @@
+# Changelog
+
+## Unreleased
+
+### 2026-03-06
+
+- **fix(sync):** `sync -f ~/path` no longer sends the shell-expanded absolute path to remote hosts — converts back to `~/path` so each host resolves the path relative to its own home directory.
+- **fix(sync):** When all reachable hosts are in sync but some hosts are missing the file, the sync reason now reads `"in sync on reachable hosts, pushing to N missing"` instead of the misleading `"newest mtime: X, +N missing"`. Decision message when no work is needed updated to `"already in sync ✓"`.
+
+- **fix(check):** Three-level status display — all-failed shows `✗ failed`, partial shows `⊘ partial`, all-success shows `✓ collected`. Previously SSH failures still showed green `✓ collected` due to `schema_version` always being present in the JSON result.
+- **feat(checkout):** Enhanced TUI and new `--format table` output showing CPU Load, Memory, Disk, Battery, and Last Seen columns. Memory/Disk >90% highlighted in red.
+  - Extractors handle both sh (macOS/Linux) and PowerShell data formats
+  - `cpu_load`: tries `load1`→`load5`→`load15`→raw string (covers macOS `sysctl` format)
+  - `memory`: computes from `total_bytes`/`used_bytes` (sh) or PowerShell JSON string
+  - `disk`: uses "/" mount entry from array (sh) or first drive from PowerShell JSON string
+- **feat(cli):** Added `--config/-c` global option to specify an alternative config file path (e.g. `ssync -c /tmp/test.toml check -a`).
+- **feat(sync):** Added `--files/-f` for ad-hoc file sync without config (e.g. `ssync sync -h host1,host2 -f ~/.bashrc`). Push-missing is now the default behavior — files are pushed to hosts where they don't exist. Use `--no-push-missing` to disable.
+- **fix(sync):** Per-target upload error handling — a failed upload to one host no longer aborts the entire sync operation. Each target now reports success/failure individually.
+- **fix(sync):** `mkdir -p` before upload correctly handles `~/`-prefixed paths using `$HOME` expansion instead of literal `'~'`.

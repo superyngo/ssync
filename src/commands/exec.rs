@@ -38,7 +38,7 @@ pub async fn run(
         _ => None,
     };
 
-    let hosts = ctx.require_targets()?;
+    let hosts = ctx.resolve_hosts()?;
     let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
     let mut summary = Summary::default();
 
@@ -128,7 +128,8 @@ async fn exec_on_host(
     keep: bool,
     sudo: bool,
 ) -> Result<String> {
-    let temp_dir = shell::temp_dir(host.shell);
+    // Get the actual expanded temp directory path
+    let temp_dir = get_expanded_temp_dir(host, timeout).await?;
     let script_name = script_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -138,6 +139,13 @@ async fn exec_on_host(
     let remote_path = format!(
         "{}/ssync_{}_{}", temp_dir, std::process::id(), script_name
     );
+
+    // Quote the path for shells that need it (PowerShell)
+    let remote_path_quoted = if host.shell == ShellType::PowerShell {
+        format!("'{}'", remote_path)
+    } else {
+        remote_path.clone()
+    };
 
     // Upload
     executor::upload(host, script_path, &remote_path, timeout).await?;
@@ -150,7 +158,7 @@ async fn exec_on_host(
     // Execute
     let exec_cmd = match host.shell {
         ShellType::Sh => remote_path.clone(),
-        ShellType::PowerShell => format!("powershell -File {}", remote_path),
+        ShellType::PowerShell => format!("powershell -File {}", remote_path_quoted),
         ShellType::Cmd => remote_path.clone(),
     };
 
@@ -166,7 +174,7 @@ async fn exec_on_host(
     if !keep {
         let rm_cmd = match host.shell {
             ShellType::Sh => format!("rm -f {}", remote_path),
-            ShellType::PowerShell => format!("Remove-Item -Force '{}'", remote_path),
+            ShellType::PowerShell => format!("Remove-Item -Force {}", remote_path_quoted),
             ShellType::Cmd => format!("del /f \"{}\"", remote_path),
         };
         let _ = executor::run_remote(host, &rm_cmd, timeout).await;
@@ -177,4 +185,28 @@ async fn exec_on_host(
     } else {
         bail!("Script failed (exit {}): {}", output.exit_code.unwrap_or(-1), output.stderr.trim());
     }
+}
+
+async fn get_expanded_temp_dir(host: &crate::config::schema::HostEntry, timeout: u64) -> Result<String> {
+    let temp_dir = shell::temp_dir(host.shell);
+    
+    // For sh, /tmp is already a literal path
+    if host.shell == ShellType::Sh {
+        return Ok(temp_dir.to_string());
+    }
+    
+    // For PowerShell and Cmd, need to expand the variable
+    let echo_cmd = match host.shell {
+        ShellType::PowerShell => format!("echo $env:TEMP"),
+        ShellType::Cmd => format!("echo %TEMP%"),
+        ShellType::Sh => unreachable!(),
+    };
+    
+    let output = executor::run_remote(host, &echo_cmd, timeout).await?;
+    
+    if !output.success {
+        bail!("Failed to get temp directory: {}", output.stderr.trim());
+    }
+    
+    Ok(output.stdout.trim().to_string())
 }

@@ -1,0 +1,309 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v0.3.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: ssync
+            asset_name: ssync-linux-x86_64
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            artifact_name: ssync
+            asset_name: ssync-linux-i686
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: ssync
+            asset_name: ssync-linux-x86_64-musl
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            artifact_name: ssync
+            asset_name: ssync-linux-armv7
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: ssync
+            asset_name: ssync-linux-aarch64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact_name: ssync
+            asset_name: ssync-linux-aarch64-musl
+            cflags: "-U_FORTIFY_SOURCE"
+            cc: "aarch64-linux-gnu-gcc"
+          - os: ubuntu-latest
+            target: i686-unknown-linux-musl
+            artifact_name: ssync
+            asset_name: ssync-linux-i686-musl
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            artifact_name: ssync
+            asset_name: ssync-linux-armv7-musl
+          # Windows builds
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: ssync.exe
+            asset_name: ssync-windows-x86_64.exe
+            rustflags: "-C target-feature=+crt-static"
+            opt_level: "3"
+            lto: "thin"
+            strip: "false"
+            codegen_units: "16"
+            panic: "unwind"
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            artifact_name: ssync.exe
+            asset_name: ssync-windows-i686.exe
+            rustflags: "-C target-feature=+crt-static"
+            opt_level: "3"
+            lto: "thin"
+            strip: "false"
+            codegen_units: "16"
+            panic: "unwind"
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact_name: ssync.exe
+            asset_name: ssync-windows-aarch64.exe
+            rustflags: "-C target-feature=+crt-static"
+            opt_level: "3"
+            lto: "thin"
+            strip: "false"
+            codegen_units: "16"
+            panic: "unwind"
+          # macOS builds
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact_name: ssync
+            asset_name: ssync-macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: ssync
+            asset_name: ssync-macos-aarch64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for musl targets)
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'i686-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install 32-bit libraries (Linux i686 only)
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib g++-multilib
+
+      - name: Install ARM cross-compilation tools (ARM targets only)
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf
+
+      - name: Install ARM64 cross-compilation tools (ARM64 targets only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Configure cargo for ARM cross-compilation
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf' || matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p ~/.cargo
+          if [ "${{ matrix.target }}" = "armv7-unknown-linux-gnueabihf" ]; then
+            echo '[target.armv7-unknown-linux-gnueabihf]' >> ~/.cargo/config.toml
+            echo 'linker = "arm-linux-gnueabihf-gcc"' >> ~/.cargo/config.toml
+          elif [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+            echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+          fi
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: ${{ matrix.opt_level }}
+          CARGO_PROFILE_RELEASE_LTO: ${{ matrix.lto }}
+          CARGO_PROFILE_RELEASE_STRIP: ${{ matrix.strip }}
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ matrix.codegen_units }}
+          CARGO_PROFILE_RELEASE_PANIC: ${{ matrix.panic }}
+
+      - name: Build with cross (musl targets)
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'i686-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
+        run: cross build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CFLAGS: ${{ matrix.cflags }}
+          CC: ${{ matrix.cc }}
+
+      - name: Build (Linux and macOS)
+        if: matrix.os != 'windows-latest' && matrix.target != 'x86_64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'i686-unknown-linux-musl' && matrix.target != 'armv7-unknown-linux-musleabihf'
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CFLAGS: ${{ matrix.cflags }}
+          CC: ${{ matrix.cc }}
+
+      - name: Strip binary (Linux and macOS - x86)
+        if: matrix.os != 'windows-latest' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'i686-unknown-linux-musl' && matrix.target != 'armv7-unknown-linux-musleabihf'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Strip binary (ARM32)
+        if: matrix.target == 'armv7-unknown-linux-gnueabihf'
+        run: arm-linux-gnueabihf-strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Strip binary (ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Strip binary (cross-compiled musl)
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl' || matrix.target == 'i686-unknown-linux-musl' || matrix.target == 'armv7-unknown-linux-musleabihf'
+        run: echo "Skipping strip for cross-compiled ${{ matrix.target }} (already stripped by cross)"
+
+      - name: Create tarball (Linux and macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.artifact_name }}
+          mv ${{ matrix.asset_name }}.tar.gz ../../../
+
+      - name: Upload artifacts (Linux and macOS)
+        if: matrix.os != 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}.tar.gz
+
+      - name: Upload artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.version || github.ref }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: |
+          echo "Current directory structure:"
+          ls -la
+          echo "Artifacts directory:"
+          ls -la artifacts/
+          echo "Looking for artifacts:"
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.exe" \)
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release_files
+          find artifacts -type f -name "*.tar.gz" -exec cp {} release_files/ \;
+          for dir in artifacts/*; do
+            if [ -d "$dir" ] && [[ "$dir" == *"windows"* ]]; then
+              asset_name=$(basename "$dir")
+              exe_file="$dir/ssync.exe"
+              if [ -f "$exe_file" ]; then
+                cp "$exe_file" "release_files/$asset_name"
+              fi
+            fi
+          done
+          echo "Files in release_files:"
+          ls -la release_files/
+
+      - name: Generate checksums
+        run: |
+          cd release_files
+          if [ -n "$(ls -A)" ]; then
+            sha256sum * > SHA256SUMS
+            echo "Checksums generated:"
+            cat SHA256SUMS
+          else
+            echo "No files found in release_files directory!"
+            exit 1
+          fi
+
+      - name: Get tag message
+        id: tag_message
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG_NAME="${{ github.event.inputs.version }}"
+          else
+            TAG_NAME=${GITHUB_REF#refs/tags/}
+          fi
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          TAG_MESSAGE=$(git tag -l --format='%(contents)' "$TAG_NAME")
+          if [ -z "$TAG_MESSAGE" ]; then
+            TAG_MESSAGE="Release $TAG_NAME"
+          fi
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAG_MESSAGE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag_message.outputs.tag_name }}
+          files: release_files/*
+          draft: false
+          prerelease: false
+          body: |
+            ${{ steps.tag_message.outputs.message }}
+
+            ---
+
+            ## 📦 Downloads
+
+            Please download the appropriate version for your system from below.
+
+            ## 🔒 File Verification
+
+            Use the SHA256SUMS file to verify the integrity of downloaded files.
+
+            ---
+
+            ## 📝 Auto-generated Changelog
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

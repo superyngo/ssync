@@ -1,6 +1,7 @@
 use crate::config::schema::HostEntry;
 
 /// Filter hosts based on CLI parameters.
+/// Matches groups from host[].groups tags.
 pub fn filter_hosts<'a>(
     hosts: &'a [HostEntry],
     groups: &[String],
@@ -13,12 +14,10 @@ pub fn filter_hosts<'a>(
 
     let mut result: Vec<&HostEntry> = hosts.iter().collect();
 
-    // Filter by group if specified
     if !groups.is_empty() {
         result.retain(|h| h.groups.iter().any(|g| groups.contains(g)));
     }
 
-    // Further filter by host name (intersection with group filter)
     if !host_names.is_empty() {
         result.retain(|h| host_names.contains(&h.name));
     }
@@ -37,13 +36,13 @@ mod tests {
                 name: "a".into(),
                 ssh_host: "a".into(),
                 shell: ShellType::Sh,
-                groups: vec!["web".into(), "all".into()],
+                groups: vec!["web".into()],
             },
             HostEntry {
                 name: "b".into(),
                 ssh_host: "b".into(),
                 shell: ShellType::PowerShell,
-                groups: vec!["db".into(), "all".into()],
+                groups: vec!["db".into()],
             },
             HostEntry {
                 name: "c".into(),

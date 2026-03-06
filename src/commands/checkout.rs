@@ -5,6 +5,14 @@ use crate::cli::OutputFormat;
 
 use super::Context;
 
+/// Snapshot row from the database.
+struct HostSnapshot {
+    host: String,
+    collected_at: i64,
+    online: bool,
+    data: serde_json::Value,
+}
+
 pub async fn run(
     ctx: &Context,
     format: OutputFormat,
@@ -12,7 +20,7 @@ pub async fn run(
     since: Option<String>,
     out: Option<String>,
 ) -> Result<()> {
-    let hosts = ctx.require_targets()?;
+    let hosts = ctx.resolve_hosts()?;
     let host_names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
 
     match format {
@@ -35,10 +43,15 @@ pub async fn run(
             std::fs::write(path, html)?;
             println!("HTML report written to {}", path);
         }
+        OutputFormat::Table => {
+            let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
+            print_table_report(&snapshots);
+        }
         OutputFormat::Tui => {
             #[cfg(feature = "tui")]
             {
-                run_tui(ctx, &host_names, history, since.as_deref())?;
+                let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
+                run_tui(&snapshots)?;
             }
             #[cfg(not(feature = "tui"))]
             {
@@ -48,6 +61,193 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Fetch the latest snapshot for each host.
+fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<HostSnapshot>> {
+    let mut snapshots = Vec::new();
+    for host in host_names {
+        let mut stmt = ctx.db.prepare(
+            "SELECT collected_at, online, raw_json FROM check_snapshots \
+             WHERE host = ?1 ORDER BY collected_at DESC LIMIT 1",
+        )?;
+        let entry = stmt.query_row(params![host], |row| {
+            let ts: i64 = row.get(0)?;
+            let online: bool = row.get(1)?;
+            let json_str: String = row.get(2)?;
+            Ok((ts, online, json_str))
+        });
+
+        match entry {
+            Ok((ts, online, json_str)) => {
+                let data = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
+                snapshots.push(HostSnapshot {
+                    host: host.to_string(),
+                    collected_at: ts,
+                    online,
+                    data,
+                });
+            }
+            Err(_) => {
+                snapshots.push(HostSnapshot {
+                    host: host.to_string(),
+                    collected_at: 0,
+                    online: false,
+                    data: serde_json::Value::Null,
+                });
+            }
+        }
+    }
+    Ok(snapshots)
+}
+
+fn extract_cpu_load(data: &serde_json::Value) -> String {
+    let v = match data.get("cpu_load") { Some(v) => v, None => return "-".to_string() };
+
+    // Sh format: {load1: f, load5: f, load15: f}
+    if let Some(obj) = v.as_object() {
+        for key in &["load1", "load5", "load15"] {
+            if let Some(f) = obj.get(*key).and_then(|n| n.as_f64()) {
+                return format!("{:.2}", f);
+            }
+        }
+    }
+    // PowerShell / raw string format: "21.18..."
+    if let Some(s) = v.as_str() {
+        if let Ok(f) = s.trim().parse::<f64>() {
+            return format!("{:.2}", f);
+        }
+    }
+    if let Some(f) = v.as_f64() { return format!("{:.2}", f); }
+    "-".to_string()
+}
+
+fn extract_memory(data: &serde_json::Value) -> (String, bool) {
+    let v = match data.get("memory") { Some(v) => v, None => return ("-".to_string(), false) };
+
+    // Sh format: {total_bytes, used_bytes}
+    if let (Some(total), Some(used)) = (
+        v.get("total_bytes").and_then(|n| n.as_u64()),
+        v.get("used_bytes").and_then(|n| n.as_u64()),
+    ) {
+        if total > 0 {
+            let pct = used as f64 / total as f64 * 100.0;
+            return (format!("{:.0}%", pct), pct > 90.0);
+        }
+    }
+    // PowerShell format: JSON string {TotalVisibleMemorySize, FreePhysicalMemory} (KB)
+    if let Some(s) = v.as_str() {
+        if let Ok(p) = serde_json::from_str::<serde_json::Value>(s) {
+            if let (Some(total), Some(free)) = (
+                p.get("TotalVisibleMemorySize").and_then(|n| n.as_u64()),
+                p.get("FreePhysicalMemory").and_then(|n| n.as_u64()),
+            ) {
+                if total > 0 {
+                    let pct = (total - free) as f64 / total as f64 * 100.0;
+                    return (format!("{:.0}%", pct), pct > 90.0);
+                }
+            }
+        }
+    }
+    ("-".to_string(), false)
+}
+
+fn extract_disk(data: &serde_json::Value) -> (String, bool) {
+    let v = match data.get("disk") { Some(v) => v, None => return ("-".to_string(), false) };
+
+    // Sh format: [{total_bytes, used_bytes, mount}, ...]
+    if let Some(arr) = v.as_array() {
+        let entry = arr.iter()
+            .find(|e| e.get("mount").and_then(|m| m.as_str()) == Some("/"))
+            .or_else(|| arr.iter().find(|e| e.get("total_bytes").is_some()));
+        if let Some(e) = entry {
+            if let (Some(total), Some(used)) = (
+                e.get("total_bytes").and_then(|n| n.as_u64()),
+                e.get("used_bytes").and_then(|n| n.as_u64()),
+            ) {
+                if total > 0 {
+                    let pct = used as f64 / total as f64 * 100.0;
+                    return (format!("{:.0}%", pct), pct > 90.0);
+                }
+            }
+        }
+    }
+    // PowerShell format: JSON string [{Name, Used, Free}, ...] (bytes)
+    if let Some(s) = v.as_str() {
+        if let Ok(p) = serde_json::from_str::<serde_json::Value>(s) {
+            if let Some(e) = p.as_array().and_then(|a| a.first()) {
+                if let (Some(used), Some(free)) = (
+                    e.get("Used").and_then(|n| n.as_u64()),
+                    e.get("Free").and_then(|n| n.as_u64()),
+                ) {
+                    let total = used + free;
+                    if total > 0 {
+                        let pct = used as f64 / total as f64 * 100.0;
+                        return (format!("{:.0}%", pct), pct > 90.0);
+                    }
+                }
+            }
+        }
+    }
+    ("-".to_string(), false)
+}
+
+fn extract_battery(data: &serde_json::Value) -> String {
+    if let Some(bat) = data.get("battery") {
+        if bat.get("present").and_then(|v| v.as_bool()) == Some(false) {
+            return "N/A".to_string();
+        }
+        if let Some(pct) = bat.get("percent").and_then(|v| v.as_u64()) {
+            return format!("{}%", pct);
+        }
+        // present but no percent (desktop without battery info)
+        return "-".to_string();
+    }
+    "-".to_string()
+}
+
+fn format_relative_time(ts: i64) -> String {
+    if ts == 0 {
+        return "never".to_string();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let diff = now - ts;
+    if diff < 60 {
+        format!("{}s ago", diff)
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else {
+        format!("{}d ago", diff / 86400)
+    }
+}
+
+/// Print a plain-text table report to stdout.
+fn print_table_report(snapshots: &[HostSnapshot]) {
+    // Header
+    println!(
+        "{:<16} {:<12} {:<10} {:<8} {:<8} {:<8} {}",
+        "Host", "Status", "CPU Load", "Memory", "Disk", "Battery", "Last Seen"
+    );
+    println!("{}", "-".repeat(78));
+
+    for snap in snapshots {
+        let status = if snap.online { "\x1b[32m✓ online\x1b[0m" } else { "\x1b[31m✗ offline\x1b[0m" };
+        let cpu = extract_cpu_load(&snap.data);
+        let (mem, mem_crit) = extract_memory(&snap.data);
+        let (disk, disk_crit) = extract_disk(&snap.data);
+        let bat = extract_battery(&snap.data);
+        let last_seen = format_relative_time(snap.collected_at);
+
+        let mem_str = if mem_crit { format!("\x1b[31m{}\x1b[0m", mem) } else { mem };
+        let disk_str = if disk_crit { format!("\x1b[31m{}\x1b[0m", disk) } else { disk };
+
+        println!(
+            "{:<16} {:<20} {:<10} {:<16} {:<16} {:<8} {}",
+            snap.host, status, cpu, mem_str, disk_str, bat, last_seen
+        );
+    }
 }
 
 fn build_json_report(
@@ -175,12 +375,7 @@ fn render_html(data: &serde_json::Value) -> Result<String> {
 }
 
 #[cfg(feature = "tui")]
-fn run_tui(
-    ctx: &Context,
-    host_names: &[&str],
-    history: bool,
-    since: Option<&str>,
-) -> Result<()> {
+fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
     use crossterm::{
         event::{self, Event, KeyCode},
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -188,8 +383,6 @@ fn run_tui(
     };
     use ratatui::{prelude::*, widgets::*};
     use std::io::stdout;
-
-    let data = build_json_report(ctx, host_names, history, since)?;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -199,25 +392,59 @@ fn run_tui(
         terminal.draw(|frame| {
             let area = frame.area();
 
-            // Build table rows from data
             let mut rows = Vec::new();
-            if let Some(obj) = data.as_object() {
-                for (host, val) in obj {
-                    let online = val
-                        .get("online")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let status = if online { "✓ online" } else { "✗ offline" };
-                    rows.push(Row::new(vec![host.clone(), status.to_string()]));
-                }
+            for snap in snapshots {
+                let status = if snap.online { "✓ online" } else { "✗ offline" };
+                let cpu = extract_cpu_load(&snap.data);
+                let (mem, mem_crit) = extract_memory(&snap.data);
+                let (disk, disk_crit) = extract_disk(&snap.data);
+                let bat = extract_battery(&snap.data);
+                let last_seen = format_relative_time(snap.collected_at);
+
+                let status_style = if snap.online {
+                    Style::new().fg(Color::Green)
+                } else {
+                    Style::new().fg(Color::Red)
+                };
+                let mem_style = if mem_crit {
+                    Style::new().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+                let disk_style = if disk_crit {
+                    Style::new().fg(Color::Red)
+                } else {
+                    Style::default()
+                };
+
+                rows.push(Row::new(vec![
+                    Cell::from(snap.host.clone()),
+                    Cell::from(status.to_string()).style(status_style),
+                    Cell::from(cpu),
+                    Cell::from(mem).style(mem_style),
+                    Cell::from(disk).style(disk_style),
+                    Cell::from(bat),
+                    Cell::from(last_seen),
+                ]));
             }
 
             let table = Table::new(
                 rows,
-                [Constraint::Length(20), Constraint::Min(30)],
+                [
+                    Constraint::Length(16),
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Min(10),
+                ],
             )
-            .header(Row::new(vec!["Host", "Status"]).style(Style::new().bold()))
-            .block(Block::bordered().title(" ssync checkout "));
+            .header(
+                Row::new(vec!["Host", "Status", "CPU Load", "Memory", "Disk", "Battery", "Last Seen"])
+                    .style(Style::new().bold()),
+            )
+            .block(Block::bordered().title(" ssync checkout — press q to quit "));
 
             frame.render_widget(table, area);
         })?;

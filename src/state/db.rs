@@ -25,8 +25,12 @@ pub fn db_path() -> Result<PathBuf> {
 }
 
 /// Open or create the SQLite database with migrations applied.
-pub fn open() -> Result<Connection> {
-    let path = db_path()?;
+/// If `override_dir` is provided, uses that directory instead of the default.
+pub fn open(override_dir: Option<&std::path::Path>) -> Result<Connection> {
+    let path = match override_dir {
+        Some(dir) => dir.join("ssync.db"),
+        None => db_path()?,
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;

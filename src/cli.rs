@@ -1,4 +1,6 @@
-use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "ssync", version, about = "SSH-config-based cross-platform remote management tool")]
@@ -7,16 +9,27 @@ pub struct Cli {
     #[arg(short = 'v', long)]
     pub verbose: bool,
 
+    /// Path to config file (default: ~/.config/ssync/config.toml)
+    #[arg(short = 'c', long, global = true)]
+    pub config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+/// Common target selection arguments for commands that operate on remote hosts.
+#[derive(Args, Clone, Debug)]
+pub struct TargetArgs {
     /// Specify groups (comma-separated)
     #[arg(short, long, value_delimiter = ',')]
     pub group: Vec<String>,
 
     /// Specify hosts (comma-separated)
-    #[arg(short = 'H', long, value_delimiter = ',')]
+    #[arg(short, long, value_delimiter = ',')]
     pub host: Vec<String>,
 
     /// Target all hosts
-    #[arg(long)]
+    #[arg(short, long)]
     pub all: bool,
 
     /// Execute sequentially instead of in parallel
@@ -27,8 +40,9 @@ pub struct Cli {
     #[arg(long)]
     pub timeout: Option<u64>,
 
-    #[command(subcommand)]
-    pub command: Commands,
+    /// Print help
+    #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
+    pub help: Option<bool>,
 }
 
 #[derive(Subcommand)]
@@ -42,13 +56,25 @@ pub enum Commands {
         /// Show what would be imported without writing
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip specific hosts (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        skip: Vec<String>,
     },
 
     /// Collect system snapshots from hosts and store in state DB
-    Check,
+    #[command(disable_help_flag = true)]
+    Check {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
 
     /// View historical data and generate reports from state DB
+    #[command(disable_help_flag = true)]
     Checkout {
+        #[command(flatten)]
+        target: TargetArgs,
+
         /// Output format
         #[arg(long, default_value = "tui")]
         format: OutputFormat,
@@ -67,14 +93,30 @@ pub enum Commands {
     },
 
     /// Synchronize files across hosts using collect-decide-distribute model
+    #[command(disable_help_flag = true)]
     Sync {
+        #[command(flatten)]
+        target: TargetArgs,
+
         /// Preview sync decisions without making changes
         #[arg(long)]
         dry_run: bool,
+
+        /// Ad-hoc file paths to sync (comma-separated)
+        #[arg(short = 'f', long, value_delimiter = ',')]
+        files: Vec<String>,
+
+        /// Don't push files to hosts that are missing them
+        #[arg(long)]
+        no_push_missing: bool,
     },
 
     /// Execute a command string on remote hosts
+    #[command(disable_help_flag = true)]
     Run {
+        #[command(flatten)]
+        target: TargetArgs,
+
         /// Command to execute
         command: String,
 
@@ -88,7 +130,11 @@ pub enum Commands {
     },
 
     /// Upload and execute a local script on remote hosts
+    #[command(disable_help_flag = true)]
     Exec {
+        #[command(flatten)]
+        target: TargetArgs,
+
         /// Local script path
         script: String,
 
@@ -109,6 +155,9 @@ pub enum Commands {
         dry_run: bool,
     },
 
+    /// Open config file in $EDITOR
+    Config,
+
     /// View operation logs
     Log {
         /// Show last N entries (default: 20)
@@ -120,7 +169,7 @@ pub enum Commands {
         since: Option<String>,
 
         /// Filter by host name
-        #[arg(short = 'H', long)]
+        #[arg(short, long)]
         host: Option<String>,
 
         /// Filter by action type
@@ -136,6 +185,7 @@ pub enum Commands {
 #[derive(Clone, clap::ValueEnum)]
 pub enum OutputFormat {
     Tui,
+    Table,
     Html,
     Json,
 }
