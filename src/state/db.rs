@@ -9,7 +9,8 @@ const CURRENT_VERSION: u32 = 1;
 pub fn state_dir() -> Result<PathBuf> {
     // On macOS/Linux: ~/.local/state/ssync
     // On Windows: %LOCALAPPDATA%/ssync
-    let _base = dirs::data_local_dir().context("Cannot determine local data directory")?;
+    #[cfg(target_os = "windows")]
+    let base = dirs::data_local_dir().context("Cannot determine local data directory")?;
     // Use state subdirectory on Linux/macOS for XDG compliance
     #[cfg(not(target_os = "windows"))]
     let base = {
