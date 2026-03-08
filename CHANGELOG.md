@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-03-08
+
+### Fixed
+- Corrected Windows state directory variable binding in `state_dir()` for proper platform-specific resolution.
+
 ## [v0.1.0] - 2026-03-06
 
 ### Added
