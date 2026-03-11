@@ -44,6 +44,7 @@ pub async fn run(
     dry_run: bool,
     files: &[String],
     no_push_missing: bool,
+    cli_source: Option<&str>,
 ) -> Result<()> {
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
@@ -63,6 +64,7 @@ pub async fn run(
                 "ad-hoc",
                 dry_run,
                 push_missing,
+                cli_source,
                 &mut total_summary,
             )
             .await?;
@@ -72,84 +74,40 @@ pub async fn run(
     }
 
     // Config-based sync
-    if ctx.config.sync.file.is_empty() {
-        println!("No sync configured. Add [[sync.file]] to config.toml or use --files/-f.");
+    let sync_entries = ctx.resolve_syncs();
+    if sync_entries.is_empty() {
+        println!("No sync entries matched the current filter. Add [[sync]] to config.toml or use --files/-f.");
         return Ok(());
     }
 
     let mut total_summary = Summary::default();
 
-    match &ctx.mode {
-        // --all or --host: process [[sync.file]] entries without groups
-        super::TargetMode::All | super::TargetMode::Hosts(_) => {
-            let files: Vec<_> = ctx
-                .config
-                .sync
-                .file
-                .iter()
-                .filter(|f| f.groups.is_empty())
-                .collect();
-            if files.is_empty() {
-                println!("No [[sync.file]] without groups configured for --all/--host sync.");
-                return Ok(());
-            }
-            if hosts.len() < 2 {
-                println!("Need at least 2 hosts for sync (found {})", hosts.len());
-                return Ok(());
-            }
-            println!("\n── Sync: global ──");
-            for sync_file in files {
-                for path in &sync_file.paths {
-                    sync_path_across(
-                        ctx,
-                        &hosts,
-                        path,
-                        "global",
-                        dry_run,
-                        push_missing,
-                        &mut total_summary,
-                    )
-                    .await?;
-                }
-            }
-        }
+    if hosts.len() < 2 {
+        println!("Need at least 2 hosts for sync (found {})", hosts.len());
+        return Ok(());
+    }
 
-        // --group: process [[sync.file]] entries whose groups intersect
-        super::TargetMode::Groups(groups) => {
-            let files: Vec<_> = ctx
-                .config
-                .sync
-                .file
-                .iter()
-                .filter(|f| !f.groups.is_empty() && f.groups.iter().any(|g| groups.contains(g)))
-                .collect();
-            if files.is_empty() {
-                println!(
-                    "No [[sync.file]] configured for group(s): {}",
-                    groups.join(", ")
-                );
-                return Ok(());
-            }
-            if hosts.len() < 2 {
-                println!("Need at least 2 hosts for sync (found {})", hosts.len());
-                return Ok(());
-            }
-            let label = groups.join(", ");
-            println!("\n── Sync group: {} ──", label);
-            for sync_file in files {
-                for path in &sync_file.paths {
-                    sync_path_across(
-                        ctx,
-                        &hosts,
-                        path,
-                        &label,
-                        dry_run,
-                        push_missing,
-                        &mut total_summary,
-                    )
-                    .await?;
-                }
-            }
+    let label = match &ctx.mode {
+        super::TargetMode::All => "global".to_string(),
+        super::TargetMode::Groups(g) => g.join(", "),
+        super::TargetMode::Hosts(h) => h.join(", "),
+    };
+    println!("\n── Sync: {} ──", label);
+    for sync_entry in sync_entries {
+        // CLI --source takes priority, then config source
+        let effective_source = cli_source.or(sync_entry.source.as_deref());
+        for path in &sync_entry.paths {
+            sync_path_across(
+                ctx,
+                &hosts,
+                path,
+                &label,
+                dry_run,
+                push_missing,
+                effective_source,
+                &mut total_summary,
+            )
+            .await?;
         }
     }
 
@@ -158,6 +116,7 @@ pub async fn run(
 }
 
 /// Sync a single path across a set of hosts.
+#[allow(clippy::too_many_arguments)]
 async fn sync_path_across(
     ctx: &Context,
     hosts: &[&HostEntry],
@@ -165,6 +124,7 @@ async fn sync_path_across(
     group_name: &str,
     dry_run: bool,
     push_missing: bool,
+    source_override: Option<&str>,
     summary: &mut Summary,
 ) -> Result<()> {
     // Stage 1: Collect metadata from all hosts
@@ -180,52 +140,63 @@ async fn sync_path_across(
     }
 
     // Stage 2: Decide which version to use
-    let decisions = make_decisions(
-        &collect_result.found,
-        &ctx.config.settings.conflict_strategy,
-        path,
-        push_missing,
-        &collect_result.missing,
-    );
+    let decisions = if let Some(src) = source_override {
+        // Fixed source: bypass automatic selection
+        make_decisions_fixed_source(
+            &collect_result.found,
+            path,
+            push_missing,
+            &collect_result.missing,
+            src,
+        )?
+    } else {
+        make_decisions(
+            &collect_result.found,
+            &ctx.config.settings.conflict_strategy,
+            path,
+            push_missing,
+            &collect_result.missing,
+        )
+    };
 
     if decisions.is_empty() {
-        for fi in &collect_result.found {
-            printer::print_host_line(&fi.host, "ok", "already in sync");
-        }
+        let hosts_list: Vec<&str> = collect_result
+            .found
+            .iter()
+            .map(|f| f.host.as_str())
+            .collect();
+        println!("  {} (all in sync)", path);
+        printer::print_host_line("passed", "ok", &hosts_list.join(", "));
         summary.add_success();
         return Ok(());
     }
 
-    // Display decisions
     for decision in &decisions {
-        // Show hosts already in sync before listing what needs to be synced
-        for host in &decision.synced_hosts {
-            printer::print_host_line(host, "ok", "already in sync");
-        }
+        // Header: show all non-source hosts (synced + targets) in the targets list
+        let mut all_targets: Vec<&str> = decision.synced_hosts.iter().map(|s| s.as_str()).collect();
+        all_targets.extend(decision.target_hosts.iter().map(|s| s.as_str()));
         println!(
             "  {} → source: {} → targets: [{}] ({})",
             decision.path,
             decision.source_host,
-            decision.target_hosts.join(", "),
+            all_targets.join(", "),
             decision.reason
         );
-    }
 
-    if dry_run {
-        println!("  [dry-run] No changes applied.");
-        return Ok(());
-    }
+        // Passed: hosts already in sync (no upload needed)
+        if !decision.synced_hosts.is_empty() {
+            printer::print_host_line("passed", "ok", &decision.synced_hosts.join(", "));
+        }
 
-    // Stage 3: Distribute via local relay
-    for decision in &decisions {
+        if dry_run {
+            continue;
+        }
+
+        // Stage 3: Distribute via local relay
         match distribute(hosts, decision, ctx.timeout, ctx.concurrency()).await {
-            Ok((succeeded, failed)) => {
+            Ok((succeeded, failed_uploads)) => {
                 if !succeeded.is_empty() {
-                    printer::print_host_line(
-                        &decision.source_host,
-                        "ok",
-                        &format!("synced {} to {} host(s)", decision.path, succeeded.len()),
-                    );
+                    printer::print_host_line("synced", "ok", &succeeded.join(", "));
                     summary.add_success();
 
                     // Update sync_state in DB
@@ -250,25 +221,27 @@ async fn sync_path_across(
                     );
                 }
 
-                for (target, err) in &failed {
-                    printer::print_host_line(target, "error", &format!("upload failed: {}", err));
-                    summary.add_failure(target, err);
-                }
-
-                if succeeded.is_empty() && !failed.is_empty() {
-                    // All targets failed
+                if !failed_uploads.is_empty() {
+                    let failed_names: Vec<&str> =
+                        failed_uploads.iter().map(|(n, _)| n.as_str()).collect();
+                    printer::print_host_line("failed", "error", &failed_names.join(", "));
+                    for (target, err) in &failed_uploads {
+                        println!("    {}: {}", target, err);
+                        summary.add_failure(target, err);
+                    }
                 }
             }
             Err(e) => {
-                // download itself failed
-                printer::print_host_line(
-                    &decision.source_host,
-                    "error",
-                    &format!("failed to download {}: {}", decision.path, e),
-                );
+                // Download from source failed — all targets implicitly fail
+                printer::print_host_line("failed", "error", &decision.source_host);
+                println!("    {}: download failed: {}", decision.source_host, e);
                 summary.add_failure(&decision.source_host, &e.to_string());
             }
         }
+    }
+
+    if dry_run {
+        println!("  [dry-run] No changes applied.");
     }
 
     Ok(())
@@ -492,6 +465,66 @@ fn make_decisions(
             Vec::new()
         }
     }
+}
+
+/// Make sync decisions using a fixed source host (bypasses conflict strategy).
+fn make_decisions_fixed_source(
+    file_infos: &[FileInfo],
+    path: &str,
+    push_missing: bool,
+    missing_hosts: &[String],
+    source_name: &str,
+) -> Result<Vec<SyncDecision>> {
+    let source = file_infos
+        .iter()
+        .find(|f| f.host == source_name)
+        .ok_or_else(|| {
+            let available: Vec<&str> = file_infos.iter().map(|f| f.host.as_str()).collect();
+            anyhow::anyhow!(
+                "Source host '{}' has no data for '{}'. Available: [{}]",
+                source_name,
+                path,
+                available.join(", ")
+            )
+        })?;
+
+    let mut targets: Vec<String> = file_infos
+        .iter()
+        .filter(|f| f.host != source.host)
+        .filter(|f| f.hash != source.hash)
+        .map(|f| f.host.clone())
+        .collect();
+
+    if push_missing {
+        for h in missing_hosts {
+            if !targets.contains(h) {
+                targets.push(h.clone());
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let synced_hosts: Vec<String> = file_infos
+        .iter()
+        .filter(|f| f.host != source.host && f.hash == source.hash)
+        .map(|f| f.host.clone())
+        .collect();
+
+    let mut reason = format!("fixed source: {}", source_name);
+    if push_missing && !missing_hosts.is_empty() {
+        reason.push_str(&format!(", +{} missing", missing_hosts.len()));
+    }
+
+    Ok(vec![SyncDecision {
+        path: path.to_string(),
+        source_host: source.host.clone(),
+        target_hosts: targets,
+        synced_hosts,
+        reason,
+    }])
 }
 
 /// Stage 3: Distribute file from source to targets via local relay.

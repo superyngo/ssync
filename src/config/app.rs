@@ -45,7 +45,7 @@ pub fn load(custom_path: Option<&Path>) -> Result<Option<AppConfig>> {
 }
 
 /// Save config to disk, creating parent directories if needed.
-/// Adds helpful comments to [check] and [sync] sections.
+/// Adds helpful comments to [settings], [[check]] and [[sync]] sections.
 pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
     let path = resolve_path(custom_path)?;
     if let Some(parent) = path.parent() {
@@ -59,60 +59,97 @@ pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Inject helpful comments into TOML config for [check] and [sync] sections.
+/// Inject helpful comments into TOML config for [settings], [[check]] and [[sync]] sections.
 fn inject_config_comments(toml_str: &str) -> String {
+    let settings_comment = "\
+# [settings] 全域設定：
+#   state_dir = \"/custom/path/to/state\"  # 自訂 DB 存放位置
+#                                          # 預設: ~/.local/state/ssync (Linux/macOS)
+#                                          #        %LOCALAPPDATA%/ssync (Windows)
+";
+
     let check_comment = "\
-# [check] 可設定的 enabled 值：
-#   \"online\"      - 檢查主機是否在線
-#   \"system_info\" - 系統資訊 (uname / systeminfo)
-#   \"cpu_arch\"    - CPU 架構
-#   \"memory\"      - 記憶體使用量
-#   \"swap\"        - Swap 使用量
-#   \"disk\"        - 磁碟使用量
-#   \"cpu_load\"    - CPU 負載
-#   \"network\"     - 網路介面資訊
-#   \"battery\"     - 電池狀態
+# [[check]] 可設定的 enabled 值：
+# enabled = [
+#     \"online\",        # 檢查主機是否在線
+#     \"system_info\",   # 系統資訊 (uname / systeminfo)
+#     \"cpu_arch\",      # CPU 架構
+#     \"memory\",        # 記憶體使用量
+#     \"swap\",          # Swap 使用量
+#     \"disk\",          # 磁碟使用量
+#     \"cpu_load\",      # CPU 負載
+#     \"network\",       # 網路介面資訊
+#     \"battery\",       # 電池狀態
+#     \"ip_address\",    # IP 位址
+# ]
+# groups = [\"web\"]       # 僅套用於指定 group (搭配 --group/-g 使用)
+# hosts  = [\"myhost\"]    # 僅套用於指定 host (搭配 --host/-h 使用)
+#                         # groups 和 hosts 皆為空 → 全域 (搭配 --all/-a 使用)
 #
 # [[check.path]] 可設定自訂路徑監控：
 #   path  = \"/var/log\"    # 要監控的路徑
 #   label = \"Logs\"        # 顯示用的標籤
 #
 # 範例：
-#   enabled = [\"online\", \"memory\", \"disk\", \"cpu_load\"]
-#   [[check.path]]
-#   path = \"/home\"
-#   label = \"Home\"
+# [[check]]
+# enabled = [\"online\", \"memory\", \"disk\", \"cpu_load\", \"ip_address\"]
+#
+# [[check]]
+# enabled = [\"online\", \"memory\", \"disk\", \"cpu_load\"]
+# groups = [\"webservers\"]
+# [[check.path]]
+# path = \"/var/log/nginx\"
+# label = \"Nginx Logs\"
 ";
 
     let sync_comment = "\
-# [sync] 同步設定：
+# [[sync]] 同步設定：
 #
-# ── 全域同步 (搭配 --all/-a 使用) ──
-# [[sync.file]]
-# paths = [\"/etc/timezone\"]          # 要同步的檔案路徑 (可多個)
-# recursive = false                 # 是否遞迴同步 (預設: false)
-# mode = \"0644\"                     # 檔案權限 (選填)
-# propagate_deletes = false         # 是否同步刪除 (選填, 預設: false)
+# ── 全域同步 (搭配 --all/-a 使用，groups 和 hosts 皆為空) ──
+# [[sync]]
+# paths = [\"/etc/timezone\"]            # 要同步的檔案路徑 (可多個)
+# recursive = false                    # 是否遞迴同步 (預設: false)
+# mode = \"0644\"                        # 檔案權限 (選填)
+# propagate_deletes = false            # 是否同步刪除 (選填, 預設: false)
+# source = \"myhost\"                    # 固定來源主機 (選填, 跳過自動選擇)
 #
 # ── 群組同步 (搭配 --group/-g 使用) ──
-# [[sync.file]]
+# [[sync]]
 # paths = [\"/etc/nginx/nginx.conf\", \"/etc/nginx/conf.d\"]
-# groups = [\"webservers\"]           # 套用的 group (對應 host[].groups)
+# groups = [\"webservers\"]              # 套用的 group (對應 host[].groups)
 #
-# [[sync.file]]
-# paths = [\"/etc/my.cnf\"]
-# groups = [\"databases\"]
+# ── 主機同步 (搭配 --host/-h 使用) ──
+# [[sync]]
+# paths = [\"/etc/special.conf\"]
+# hosts = [\"special-host\"]             # 套用的 host (對應 host[].name)
 ";
 
     let mut result = String::new();
+    let mut has_check = false;
+    let mut has_sync = false;
     for line in toml_str.lines() {
-        if line.trim() == "[check]" {
+        if line.trim() == "[settings]" {
+            result.push_str(settings_comment);
+        } else if line.trim() == "[[check]]" && !has_check {
             result.push_str(check_comment);
-        } else if line.trim() == "[sync]" {
+            has_check = true;
+        } else if line.trim() == "[[sync]]" && !has_sync {
             result.push_str(sync_comment);
+            has_sync = true;
         }
         result.push_str(line);
         result.push('\n');
     }
+
+    // Append comment blocks for sections that are empty / absent in the TOML
+    if !has_check {
+        result.push('\n');
+        result.push_str(check_comment);
+    }
+    if !has_sync {
+        result.push('\n');
+        result.push_str(sync_comment);
+    }
+
     result
 }

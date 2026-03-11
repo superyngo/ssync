@@ -13,6 +13,26 @@ struct HostSnapshot {
     data: serde_json::Value,
 }
 
+/// Columns to display, derived from enabled metrics in applicable check entries.
+struct DisplayColumns {
+    metrics: Vec<String>,
+}
+
+impl DisplayColumns {
+    fn from_context(ctx: &Context) -> Self {
+        let checks = ctx.resolve_checks();
+        let mut metrics: Vec<String> = Vec::new();
+        for entry in &checks {
+            for m in &entry.enabled {
+                if !metrics.contains(m) && m != "online" {
+                    metrics.push(m.clone());
+                }
+            }
+        }
+        Self { metrics }
+    }
+}
+
 pub async fn run(
     ctx: &Context,
     format: OutputFormat,
@@ -22,6 +42,7 @@ pub async fn run(
 ) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
     let host_names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
+    let columns = DisplayColumns::from_context(ctx);
 
     match format {
         OutputFormat::Json => {
@@ -45,13 +66,13 @@ pub async fn run(
         }
         OutputFormat::Table => {
             let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
-            print_table_report(&snapshots);
+            print_table_report(&snapshots, &columns);
         }
         OutputFormat::Tui => {
             #[cfg(feature = "tui")]
             {
                 let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
-                run_tui(&snapshots)?;
+                run_tui(&snapshots, &columns)?;
             }
             #[cfg(not(feature = "tui"))]
             {
@@ -235,14 +256,119 @@ fn format_relative_time(ts: i64) -> String {
     }
 }
 
-/// Print a plain-text table report to stdout.
-fn print_table_report(snapshots: &[HostSnapshot]) {
-    // Header
-    println!(
-        "{:<16} {:<12} {:<10} {:<8} {:<8} {:<8} Last Seen",
-        "Host", "Status", "CPU Load", "Memory", "Disk", "Battery"
-    );
-    println!("{}", "-".repeat(78));
+fn extract_ip_address(data: &serde_json::Value) -> String {
+    if let Some(v) = data.get("ip_address") {
+        if let Some(s) = v.as_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    "-".to_string()
+}
+
+/// Extract a generic metric value as a display string.
+fn extract_metric_value(data: &serde_json::Value, metric: &str) -> (String, bool) {
+    match metric {
+        "cpu_load" => (extract_cpu_load(data), false),
+        "memory" => extract_memory(data),
+        "disk" => extract_disk(data),
+        "battery" => (extract_battery(data), false),
+        "ip_address" => (extract_ip_address(data), false),
+        "swap" => {
+            if let Some(v) = data.get("swap") {
+                if let (Some(total), Some(used)) = (
+                    v.get("total_bytes").and_then(|n| n.as_u64()),
+                    v.get("used_bytes").and_then(|n| n.as_u64()),
+                ) {
+                    if total > 0 {
+                        let pct = used as f64 / total as f64 * 100.0;
+                        return (format!("{:.0}%", pct), pct > 90.0);
+                    }
+                }
+            }
+            ("-".to_string(), false)
+        }
+        "system_info" => {
+            if let Some(v) = data.get("system_info") {
+                if let Some(obj) = v.as_object() {
+                    if let Some(uname) = obj.get("uname").and_then(|u| u.as_str()) {
+                        let short: String = uname
+                            .split_whitespace()
+                            .take(3)
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        return (short, false);
+                    }
+                }
+                if let Some(s) = v.as_str() {
+                    let short: String = s.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
+                    return (short, false);
+                }
+            }
+            ("-".to_string(), false)
+        }
+        "cpu_arch" => {
+            if let Some(v) = data.get("cpu_arch") {
+                if let Some(s) = v.as_str() {
+                    return (s.trim().to_string(), false);
+                }
+            }
+            ("-".to_string(), false)
+        }
+        "network" => ("…".to_string(), false),
+        _ => {
+            if let Some(v) = data.get(metric) {
+                if let Some(s) = v.as_str() {
+                    return (s.trim().to_string(), false);
+                }
+                return (v.to_string(), false);
+            }
+            ("-".to_string(), false)
+        }
+    }
+}
+
+/// Map metric name to a human-readable column header.
+fn metric_header(metric: &str) -> &str {
+    match metric {
+        "cpu_load" => "CPU Load",
+        "memory" => "Memory",
+        "disk" => "Disk",
+        "battery" => "Battery",
+        "ip_address" => "IP Address",
+        "swap" => "Swap",
+        "system_info" => "System",
+        "cpu_arch" => "Arch",
+        "network" => "Network",
+        _ => metric,
+    }
+}
+
+/// Column width for a metric.
+fn metric_width(metric: &str) -> usize {
+    match metric {
+        "ip_address" => 18,
+        "system_info" => 20,
+        "cpu_load" => 10,
+        "memory" | "disk" | "swap" | "battery" => 8,
+        "cpu_arch" => 8,
+        _ => 12,
+    }
+}
+
+/// Print a plain-text table report to stdout with dynamic columns.
+fn print_table_report(snapshots: &[HostSnapshot], columns: &DisplayColumns) {
+    // Build header
+    let mut header = format!("{:<16} {:<12}", "Host", "Status");
+    for metric in &columns.metrics {
+        let w = metric_width(metric);
+        header.push_str(&format!(" {:<width$}", metric_header(metric), width = w));
+    }
+    header.push_str(" Last Seen");
+    println!("{}", header);
+    println!("{}", "-".repeat(header.len().max(78)));
 
     for snap in snapshots {
         let status = if snap.online {
@@ -250,27 +376,21 @@ fn print_table_report(snapshots: &[HostSnapshot]) {
         } else {
             "\x1b[31m✗ offline\x1b[0m"
         };
-        let cpu = extract_cpu_load(&snap.data);
-        let (mem, mem_crit) = extract_memory(&snap.data);
-        let (disk, disk_crit) = extract_disk(&snap.data);
-        let bat = extract_battery(&snap.data);
         let last_seen = format_relative_time(snap.collected_at);
 
-        let mem_str = if mem_crit {
-            format!("\x1b[31m{}\x1b[0m", mem)
-        } else {
-            mem
-        };
-        let disk_str = if disk_crit {
-            format!("\x1b[31m{}\x1b[0m", disk)
-        } else {
-            disk
-        };
-
-        println!(
-            "{:<16} {:<20} {:<10} {:<16} {:<16} {:<8} {}",
-            snap.host, status, cpu, mem_str, disk_str, bat, last_seen
-        );
+        // Status has ANSI codes (8 extra chars), so pad wider
+        let mut line = format!("{:<16} {:<20}", snap.host, status);
+        for metric in &columns.metrics {
+            let w = metric_width(metric);
+            let (val, critical) = extract_metric_value(&snap.data, metric);
+            if critical {
+                line.push_str(&format!(" \x1b[31m{:<width$}\x1b[0m", val, width = w));
+            } else {
+                line.push_str(&format!(" {:<width$}", val, width = w));
+            }
+        }
+        line.push_str(&format!(" {}", last_seen));
+        println!("{}", line);
     }
 }
 
@@ -408,7 +528,7 @@ fn render_html(data: &serde_json::Value) -> Result<String> {
 }
 
 #[cfg(feature = "tui")]
-fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
+fn run_tui(snapshots: &[HostSnapshot], columns: &DisplayColumns) -> Result<()> {
     use crossterm::{
         event::{self, Event, KeyCode},
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -421,6 +541,16 @@ fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
+    // Build header and constraints dynamically
+    let mut header_cells: Vec<&str> = vec!["Host", "Status"];
+    let mut constraints: Vec<Constraint> = vec![Constraint::Length(16), Constraint::Length(12)];
+    for metric in &columns.metrics {
+        header_cells.push(metric_header(metric));
+        constraints.push(Constraint::Length(metric_width(metric) as u16));
+    }
+    header_cells.push("Last Seen");
+    constraints.push(Constraint::Min(10));
+
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
@@ -432,10 +562,6 @@ fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
                 } else {
                     "✗ offline"
                 };
-                let cpu = extract_cpu_load(&snap.data);
-                let (mem, mem_crit) = extract_memory(&snap.data);
-                let (disk, disk_crit) = extract_disk(&snap.data);
-                let bat = extract_battery(&snap.data);
                 let last_seen = format_relative_time(snap.collected_at);
 
                 let status_style = if snap.online {
@@ -443,53 +569,38 @@ fn run_tui(snapshots: &[HostSnapshot]) -> Result<()> {
                 } else {
                     Style::new().fg(Color::Red)
                 };
-                let mem_style = if mem_crit {
-                    Style::new().fg(Color::Red)
-                } else {
-                    Style::default()
-                };
-                let disk_style = if disk_crit {
-                    Style::new().fg(Color::Red)
-                } else {
-                    Style::default()
-                };
 
-                rows.push(Row::new(vec![
+                let mut cells = vec![
                     Cell::from(snap.host.clone()),
                     Cell::from(status.to_string()).style(status_style),
-                    Cell::from(cpu),
-                    Cell::from(mem).style(mem_style),
-                    Cell::from(disk).style(disk_style),
-                    Cell::from(bat),
-                    Cell::from(last_seen),
-                ]));
+                ];
+
+                for metric in &columns.metrics {
+                    let (val, critical) = extract_metric_value(&snap.data, metric);
+                    let style = if critical {
+                        Style::new().fg(Color::Red)
+                    } else {
+                        Style::default()
+                    };
+                    cells.push(Cell::from(val).style(style));
+                }
+
+                cells.push(Cell::from(last_seen));
+                rows.push(Row::new(cells));
             }
 
-            let table = Table::new(
-                rows,
-                [
-                    Constraint::Length(16),
-                    Constraint::Length(12),
-                    Constraint::Length(10),
-                    Constraint::Length(8),
-                    Constraint::Length(8),
-                    Constraint::Length(8),
-                    Constraint::Min(10),
-                ],
-            )
-            .header(
-                Row::new(vec![
-                    "Host",
-                    "Status",
-                    "CPU Load",
-                    "Memory",
-                    "Disk",
-                    "Battery",
-                    "Last Seen",
-                ])
-                .style(Style::new().bold()),
-            )
-            .block(Block::bordered().title(" ssync checkout — press q to quit "));
+            let table = Table::new(rows, &constraints)
+                .header(
+                    Row::new(
+                        header_cells
+                            .clone()
+                            .into_iter()
+                            .map(|h| h.to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                    .style(Style::new().bold()),
+                )
+                .block(Block::bordered().title(" ssync checkout — press q to quit "));
 
             frame.render_widget(table, area);
         })?;

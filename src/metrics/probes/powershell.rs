@@ -16,6 +16,9 @@ pub fn command_for(metric: &str) -> String {
         }
         "network" => "Get-NetIPAddress | Select-Object InterfaceAlias, IPAddress | ConvertTo-Json".to_string(),
         "battery" => "Get-WmiObject Win32_Battery | Select-Object EstimatedChargeRemaining, BatteryStatus | ConvertTo-Json".to_string(),
+        "ip_address" => {
+            "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -ne '127.0.0.1'} | Select-Object -ExpandProperty IPAddress) -join ' '".to_string()
+        }
         _ => String::new(),
     }
 }

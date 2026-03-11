@@ -13,16 +13,29 @@ use super::Context;
 
 pub async fn run(ctx: &Context) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
+    let checks = ctx.resolve_checks();
 
-    let check_paths: Vec<(String, String)> = ctx
-        .config
-        .check
-        .path
-        .iter()
-        .map(|p| (p.path.clone(), p.label.clone()))
-        .collect();
+    // Merge enabled metrics and paths from all applicable check entries
+    let mut enabled: Vec<String> = Vec::new();
+    let mut check_paths: Vec<(String, String)> = Vec::new();
+    for entry in &checks {
+        for m in &entry.enabled {
+            if !enabled.contains(m) {
+                enabled.push(m.clone());
+            }
+        }
+        for p in &entry.path {
+            let key = (p.path.clone(), p.label.clone());
+            if !check_paths.contains(&key) {
+                check_paths.push(key);
+            }
+        }
+    }
 
-    let enabled = &ctx.config.check.enabled;
+    if enabled.is_empty() && check_paths.is_empty() {
+        println!("No check entries matched the current filter. Add [[check]] to config.toml.");
+        return Ok(());
+    }
     let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
     let mut summary = Summary::default();
 

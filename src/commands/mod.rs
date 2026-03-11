@@ -3,6 +3,7 @@ pub mod checkout;
 pub mod config;
 pub mod exec;
 pub mod init;
+pub mod list;
 pub mod log;
 pub mod run;
 pub mod sync;
@@ -13,7 +14,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::cli::TargetArgs;
-use crate::config::schema::{AppConfig, HostEntry};
+use crate::config::schema::{AppConfig, CheckEntry, HostEntry, SyncEntry};
 
 /// Target mode derived from CLI flags.
 #[derive(Debug, Clone, PartialEq)]
@@ -113,6 +114,43 @@ impl Context {
             self.config.settings.max_concurrency
         }
     }
+
+    /// Resolve check entries based on target mode.
+    /// --groups: entries whose groups intersect. --hosts: entries whose hosts intersect.
+    /// --all: entries where both groups and hosts are empty (global entries).
+    pub fn resolve_checks(&self) -> Vec<&CheckEntry> {
+        filter_entries_by_mode(&self.config.check, |e| &e.groups, |e| &e.hosts, &self.mode)
+    }
+
+    /// Resolve sync entries based on target mode.
+    /// Same filtering logic as resolve_checks().
+    pub fn resolve_syncs(&self) -> Vec<&SyncEntry> {
+        filter_entries_by_mode(&self.config.sync, |e| &e.groups, |e| &e.hosts, &self.mode)
+    }
+}
+
+/// Generic filter for config entries (check/sync) by target mode.
+/// --groups: entries whose groups intersect the specified groups.
+/// --hosts: entries whose hosts intersect the specified hosts.
+/// --all: entries where both groups and hosts are empty (global/unscoped entries).
+fn filter_entries_by_mode<'a, T>(
+    entries: &'a [T],
+    get_groups: impl Fn(&T) -> &Vec<String>,
+    get_hosts: impl Fn(&T) -> &Vec<String>,
+    mode: &TargetMode,
+) -> Vec<&'a T> {
+    entries
+        .iter()
+        .filter(|e| {
+            let groups = get_groups(e);
+            let hosts = get_hosts(e);
+            match mode {
+                TargetMode::All => groups.is_empty() && hosts.is_empty(),
+                TargetMode::Groups(g) => groups.iter().any(|eg| g.contains(eg)),
+                TargetMode::Hosts(h) => hosts.iter().any(|eh| h.contains(eh)),
+            }
+        })
+        .collect()
 }
 
 /// Resolve which target mode the user intended, or show helpful error.

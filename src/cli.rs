@@ -113,6 +113,10 @@ pub enum Commands {
         /// Don't push files to hosts that are missing them
         #[arg(long)]
         no_push_missing: bool,
+
+        /// Use a specific host as file source (bypasses auto-detection)
+        #[arg(short = 's', long)]
+        source: Option<String>,
     },
 
     /// Execute a command string on remote hosts
@@ -161,6 +165,13 @@ pub enum Commands {
 
     /// Open config file in $EDITOR
     Config,
+
+    /// List hosts, applicable checks, and sync paths
+    #[command(disable_help_flag = true)]
+    List {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
 
     /// View operation logs
     Log {

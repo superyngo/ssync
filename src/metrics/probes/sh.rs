@@ -14,6 +14,11 @@ pub fn command_for(metric: &str) -> String {
         "battery" => "cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || \
              pmset -g batt 2>/dev/null || echo"
             .to_string(),
+        "ip_address" => {
+            "hostname -I 2>/dev/null || \
+             (ifconfig 2>/dev/null | grep 'inet ' | awk '{print $2}' | grep -v '127.0.0.1' | tr '\\n' ' ')"
+                .to_string()
+        }
         _ => String::new(),
     }
 }

@@ -11,6 +11,10 @@ pub fn command_for(metric: &str) -> String {
         "cpu_load" => "wmic cpu get LoadPercentage /value".to_string(),
         "network" => "ipconfig".to_string(),
         "battery" => "wmic path Win32_Battery get EstimatedChargeRemaining /value".to_string(),
+        "ip_address" => {
+            "for /f \"tokens=2 delims=:\" %a in ('ipconfig ^| findstr /i \"IPv4\"') do @echo %a"
+                .to_string()
+        }
         _ => String::new(),
     }
 }

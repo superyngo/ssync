@@ -38,6 +38,10 @@ async fn main() -> Result<()> {
             commands::init::run(&ctx, update, dry_run, skip).await
         }
         Commands::Config => commands::config::run(cfg).await,
+        Commands::List { target } => {
+            let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
+            commands::list::run(&ctx).await
+        }
         Commands::Check { target } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
             commands::check::run(&ctx).await
@@ -57,9 +61,10 @@ async fn main() -> Result<()> {
             dry_run,
             files,
             no_push_missing,
+            source,
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::sync::run(&ctx, dry_run, &files, no_push_missing).await
+            commands::sync::run(&ctx, dry_run, &files, no_push_missing, source.as_deref()).await
         }
         Commands::Run {
             target,

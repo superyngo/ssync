@@ -10,11 +10,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub host: Vec<HostEntry>,
 
-    #[serde(default)]
-    pub check: CheckConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check: Vec<CheckEntry>,
 
-    #[serde(default)]
-    pub sync: SyncConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync: Vec<SyncEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -106,35 +106,43 @@ impl std::fmt::Display for ShellType {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct CheckConfig {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckEntry {
     #[serde(default)]
     pub enabled: Vec<String>,
 
     #[serde(default)]
     pub path: Vec<CheckPath>,
+
+    /// Groups this check applies to. Empty = global (applies with --all).
+    #[serde(default)]
+    pub groups: Vec<String>,
+
+    /// Hosts this check applies to. Empty = not host-scoped.
+    #[serde(default)]
+    pub hosts: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckPath {
     pub path: String,
     pub label: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct SyncConfig {
-    #[serde(default)]
-    pub file: Vec<SyncFile>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncFile {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncEntry {
     pub paths: Vec<String>,
-    /// Groups this file applies to. Empty = applies to --all/--host scope.
+    /// Groups this sync applies to. Empty = global (applies with --all).
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Hosts this sync applies to. Empty = not host-scoped.
+    #[serde(default)]
+    pub hosts: Vec<String>,
     #[serde(default)]
     pub recursive: bool,
     pub mode: Option<String>,
     pub propagate_deletes: Option<bool>,
+    /// Fixed source host — bypass automatic source selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
