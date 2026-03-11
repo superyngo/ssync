@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-03-11
+
+### Added
+- List command to display configured hosts and groups
+- Enhanced CLI capabilities with improved command structure
+
+### Changed
+- Improved checkout command with better HTML export
+- Enhanced sync command with collect-decide-distribute model refinement
+- Refined app config schema for better flexibility
+- Improved shell-specific probe implementations
+
 ## [v0.1.1] - 2026-03-08
 
 ### Fixed
