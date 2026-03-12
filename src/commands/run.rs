@@ -1,10 +1,9 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use tokio::sync::Semaphore;
 
 use crate::host::executor;
+use crate::host::pool::SshPool;
 use crate::host::shell;
 use crate::output::printer;
 use crate::output::summary::Summary;
@@ -13,12 +12,28 @@ use super::Context;
 
 pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
-    let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
+
+    // Set up SSH connection pool
+    let (pool, _connected) = SshPool::setup(
+        &hosts,
+        ctx.timeout,
+        ctx.concurrency(),
+        ctx.per_host_concurrency(),
+    )
+    .await?;
+
     let mut summary = Summary::default();
 
+    // Report unreachable hosts
+    for (name, err) in pool.failed_hosts() {
+        printer::print_host_line(&name, "error", &format!("unreachable — {}", err));
+        summary.add_failure(&name, &err);
+    }
+
+    let reachable = pool.filter_reachable(&hosts);
+
     let mut handles = Vec::new();
-    for host in &hosts {
-        let sem = semaphore.clone();
+    for host in &reachable {
         let host = (*host).clone();
         let cmd = if sudo {
             shell::sudo_wrap(host.shell, command)
@@ -26,11 +41,13 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result
             command.to_string()
         };
         let timeout = ctx.timeout;
+        let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
+        let global_sem = pool.limiter.global_semaphore();
 
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
+            let _permit = global_sem.acquire_owned().await.unwrap();
             let start = Instant::now();
-            let result = executor::run_remote(&host, &cmd, timeout).await;
+            let result = executor::run_remote_pooled(&host, &cmd, timeout, socket.as_deref()).await;
             let elapsed = start.elapsed();
             (host, result, elapsed)
         }));
@@ -43,7 +60,6 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result
         match result {
             Ok(output) => {
                 if output.success {
-                    // Print stdout with host prefix
                     for line in output.stdout.lines() {
                         printer::print_host_line(&host.name, "ok", line);
                     }
@@ -54,7 +70,6 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result
                     summary.add_failure(&host.name, &msg);
                 }
 
-                // Log operation
                 ctx.db.execute(
                     "INSERT INTO operation_log (timestamp, command, host, action, status, duration_ms, note) \
                      VALUES (?1, 'run', ?2, ?3, ?4, ?5, ?6)",
@@ -85,6 +100,7 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result
         }
     }
 
+    pool.shutdown().await;
     summary.print();
     Ok(())
 }

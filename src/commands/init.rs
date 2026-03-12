@@ -1,11 +1,11 @@
 use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 use crate::config::schema::HostEntry;
 use crate::config::ssh_config;
+use crate::host::connection::ConnectionManager;
 use crate::host::shell;
 use crate::output::printer;
+use crate::output::progress::SyncProgress;
 use crate::output::summary::Summary;
 
 use super::Context;
@@ -31,94 +31,165 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         .chain(skip.iter().cloned())
         .collect();
 
-    println!(
-        "Found {} host(s). Detecting shell types...",
-        ssh_hosts.len()
-    );
-
-    let mut new_hosts: Vec<HostEntry> = Vec::new();
+    // Filter to hosts that need shell detection
+    let mut detect_hosts: Vec<String> = Vec::new();
     let mut summary = Summary::default();
-    let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
 
-    let mut handles = Vec::new();
     for ssh_host in &ssh_hosts {
-        // Skip hosts from --skip and persisted skipped_hosts
         if all_skips.iter().any(|s| s == &ssh_host.name) {
             printer::print_host_line(&ssh_host.name, "skip", "skipped");
             summary.add_skip();
             continue;
         }
-
-        // Skip if already exists and not updating
         let already_exists = ctx.config.host.iter().any(|h| h.ssh_host == ssh_host.name);
         if already_exists && !effective_update {
             continue;
         }
-
-        let sem = semaphore.clone();
-        let host_name = ssh_host.name.clone();
-
-        let timeout = ctx.timeout;
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            let shell_result = shell::detect(&host_name, timeout).await;
-            (host_name, shell_result)
-        }));
+        detect_hosts.push(ssh_host.name.clone());
     }
 
-    for handle in handles {
-        let (host_name, shell_result) = handle.await?;
-        match shell_result {
-            Ok(shell_type) => {
-                printer::print_host_line(&host_name, "ok", &format!("detected: {}", shell_type));
-                new_hosts.push(HostEntry {
-                    name: host_name.clone(),
-                    ssh_host: host_name,
-                    shell: shell_type,
-                    groups: Vec::new(),
-                });
-                summary.add_success();
-            }
-            Err(e) => {
-                // Failed hosts are NOT registered into config
-                printer::print_host_line(&host_name, "error", &format!("{}", e));
-                summary.add_failure(&host_name, &e.to_string());
+    if detect_hosts.is_empty() {
+        if skip.is_empty() {
+            println!("No new hosts to detect.");
+        }
+        // Still may need to persist skip changes
+    } else {
+        println!(
+            "Found {} host(s). Detecting shell types...",
+            detect_hosts.len()
+        );
+
+        // Build temp HostEntry list for ConnectionManager pre-check
+        let temp_entries: Vec<HostEntry> = detect_hosts
+            .iter()
+            .map(|name| HostEntry {
+                name: name.clone(),
+                ssh_host: name.clone(),
+                shell: crate::config::schema::ShellType::Sh,
+                groups: Vec::new(),
+            })
+            .collect();
+        let entry_refs: Vec<&HostEntry> = temp_entries.iter().collect();
+
+        // Pre-check connectivity via ControlMaster
+        let mut conn_mgr = ConnectionManager::new()?;
+        let mut progress = SyncProgress::new();
+
+        progress.start_host_check(entry_refs.len());
+        let connected = conn_mgr
+            .pre_check(&entry_refs, ctx.timeout, ctx.concurrency())
+            .await;
+        let failed_count = entry_refs.len() - connected;
+        progress.finish_host_check(connected, failed_count);
+
+        // Report unreachable hosts
+        for (name, err) in conn_mgr.failed_hosts() {
+            printer::print_host_line(&name, "error", &format!("{}", err));
+            summary.add_failure(&name, &err);
+        }
+
+        // Detect shell type on reachable hosts using pooled connections
+        let reachable = conn_mgr.reachable_hosts();
+        let global_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(ctx.concurrency()));
+
+        let mut handles = Vec::new();
+        for host_name in &reachable {
+            let sem = global_sem.clone();
+            let host_name = host_name.clone();
+            let timeout = ctx.timeout;
+            let socket = conn_mgr.socket_for(&host_name).map(|p| p.to_path_buf());
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let shell_result =
+                    shell::detect_pooled(&host_name, timeout, socket.as_deref()).await;
+                (host_name, shell_result)
+            }));
+        }
+
+        let mut new_hosts: Vec<HostEntry> = Vec::new();
+        for handle in handles {
+            let (host_name, shell_result) = handle.await?;
+            match shell_result {
+                Ok(shell_type) => {
+                    printer::print_host_line(
+                        &host_name,
+                        "ok",
+                        &format!("detected: {}", shell_type),
+                    );
+                    new_hosts.push(HostEntry {
+                        name: host_name.clone(),
+                        ssh_host: host_name,
+                        shell: shell_type,
+                        groups: Vec::new(),
+                    });
+                    summary.add_success();
+                }
+                Err(e) => {
+                    printer::print_host_line(&host_name, "error", &format!("{}", e));
+                    summary.add_failure(&host_name, &e.to_string());
+                }
             }
         }
-    }
 
-    summary.print();
+        conn_mgr.shutdown().await;
+        progress.clear();
+        summary.print();
 
-    if dry_run {
-        println!("\n[dry-run] No changes written.");
+        if dry_run {
+            println!("\n[dry-run] No changes written.");
+            return Ok(());
+        }
+
+        if new_hosts.is_empty() && skip.is_empty() {
+            println!("No new hosts to add.");
+            return Ok(());
+        }
+
+        // Merge with existing config
+        let mut config =
+            crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        for host in new_hosts {
+            if let Some(existing) = config.host.iter_mut().find(|h| h.ssh_host == host.ssh_host) {
+                existing.shell = host.shell;
+            } else {
+                config.host.push(host);
+            }
+        }
+
+        // Persist newly skipped hosts (deduplicated)
+        for s in &skip {
+            if !config.settings.skipped_hosts.contains(s) {
+                config.settings.skipped_hosts.push(s.clone());
+            }
+        }
+
+        crate::config::app::save(&config, ctx.config_path.as_deref())?;
+        let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
+        println!("\nConfig saved to {}", saved_path.display());
         return Ok(());
     }
 
-    if new_hosts.is_empty() && skip.is_empty() {
-        println!("No new hosts to add.");
-        return Ok(());
-    }
+    // If we only had skip changes and no hosts to detect
+    if !skip.is_empty() {
+        summary.print();
 
-    // Merge with existing config
-    let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
-    for host in new_hosts {
-        if let Some(existing) = config.host.iter_mut().find(|h| h.ssh_host == host.ssh_host) {
-            existing.shell = host.shell;
-        } else {
-            config.host.push(host);
+        if dry_run {
+            println!("\n[dry-run] No changes written.");
+            return Ok(());
         }
-    }
 
-    // Persist newly skipped hosts (deduplicated)
-    for s in &skip {
-        if !config.settings.skipped_hosts.contains(s) {
-            config.settings.skipped_hosts.push(s.clone());
+        let mut config =
+            crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        for s in &skip {
+            if !config.settings.skipped_hosts.contains(s) {
+                config.settings.skipped_hosts.push(s.clone());
+            }
         }
+        crate::config::app::save(&config, ctx.config_path.as_deref())?;
+        let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
+        println!("\nConfig saved to {}", saved_path.display());
     }
-
-    crate::config::app::save(&config, ctx.config_path.as_deref())?;
-    let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
-    println!("\nConfig saved to {}", saved_path.display());
 
     Ok(())
 }

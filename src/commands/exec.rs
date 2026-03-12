@@ -1,11 +1,10 @@
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Result};
-use tokio::sync::Semaphore;
 
 use crate::config::schema::ShellType;
+use crate::host::pool::SshPool;
 use crate::host::{executor, shell};
 use crate::output::printer;
 use crate::output::summary::Summary;
@@ -39,8 +38,6 @@ pub async fn run(
     };
 
     let hosts = ctx.resolve_hosts()?;
-    let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
-    let mut summary = Summary::default();
 
     if dry_run {
         println!("[dry-run] Script: {}", script);
@@ -56,8 +53,27 @@ pub async fn run(
         return Ok(());
     }
 
+    // Set up SSH connection pool
+    let (pool, _connected) = SshPool::setup(
+        &hosts,
+        ctx.timeout,
+        ctx.concurrency(),
+        ctx.per_host_concurrency(),
+    )
+    .await?;
+
+    let mut summary = Summary::default();
+
+    // Report unreachable hosts
+    for (name, err) in pool.failed_hosts() {
+        printer::print_host_line(&name, "error", &format!("unreachable — {}", err));
+        summary.add_failure(&name, &err);
+    }
+
+    let reachable = pool.filter_reachable(&hosts);
+
     let mut handles = Vec::new();
-    for host in &hosts {
+    for host in &reachable {
         // Check shell compatibility
         if let Some(required) = compatible_shell {
             if required != host.shell {
@@ -74,15 +90,18 @@ pub async fn run(
             }
         }
 
-        let sem = semaphore.clone();
         let host = (*host).clone();
         let script_path = script_path.to_path_buf();
         let timeout = ctx.timeout;
+        let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
+        let global_sem = pool.limiter.global_semaphore();
 
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
+            let _permit = global_sem.acquire_owned().await.unwrap();
             let start = Instant::now();
-            let result = exec_on_host(&host, &script_path, timeout, keep, sudo).await;
+            let result =
+                exec_on_host_pooled(&host, &script_path, timeout, keep, sudo, socket.as_deref())
+                    .await;
             let elapsed = start.elapsed();
             (host, result, elapsed)
         }));
@@ -118,28 +137,27 @@ pub async fn run(
         }
     }
 
+    pool.shutdown().await;
     summary.print();
     Ok(())
 }
 
-async fn exec_on_host(
+async fn exec_on_host_pooled(
     host: &crate::config::schema::HostEntry,
     script_path: &Path,
     timeout: u64,
     keep: bool,
     sudo: bool,
+    socket: Option<&Path>,
 ) -> Result<String> {
-    // Get the actual expanded temp directory path
-    let temp_dir = get_expanded_temp_dir(host, timeout).await?;
+    let temp_dir = get_expanded_temp_dir_pooled(host, timeout, socket).await?;
     let script_name = script_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("ssync_script");
 
-    // Use mktemp-style unique name
     let remote_path = format!("{}/ssync_{}_{}", temp_dir, std::process::id(), script_name);
 
-    // Quote the path for shells that need it (PowerShell)
     let remote_path_quoted = if host.shell == ShellType::PowerShell {
         format!("'{}'", remote_path)
     } else {
@@ -147,11 +165,12 @@ async fn exec_on_host(
     };
 
     // Upload
-    executor::upload(host, script_path, &remote_path, timeout).await?;
+    executor::upload_pooled(host, script_path, &remote_path, timeout, socket).await?;
 
     // Make executable (sh only)
     if host.shell == ShellType::Sh {
-        executor::run_remote(host, &format!("chmod +x {}", remote_path), timeout).await?;
+        executor::run_remote_pooled(host, &format!("chmod +x {}", remote_path), timeout, socket)
+            .await?;
     }
 
     // Execute
@@ -167,7 +186,7 @@ async fn exec_on_host(
         exec_cmd
     };
 
-    let output = executor::run_remote(host, &exec_cmd, timeout).await?;
+    let output = executor::run_remote_pooled(host, &exec_cmd, timeout, socket).await?;
 
     // Cleanup (unless --keep)
     if !keep {
@@ -176,7 +195,7 @@ async fn exec_on_host(
             ShellType::PowerShell => format!("Remove-Item -Force {}", remote_path_quoted),
             ShellType::Cmd => format!("del /f \"{}\"", remote_path),
         };
-        let _ = executor::run_remote(host, &rm_cmd, timeout).await;
+        let _ = executor::run_remote_pooled(host, &rm_cmd, timeout, socket).await;
     }
 
     if output.success {
@@ -190,9 +209,10 @@ async fn exec_on_host(
     }
 }
 
-async fn get_expanded_temp_dir(
+async fn get_expanded_temp_dir_pooled(
     host: &crate::config::schema::HostEntry,
     timeout: u64,
+    socket: Option<&Path>,
 ) -> Result<String> {
     let temp_dir = shell::temp_dir(host.shell);
 
@@ -208,7 +228,7 @@ async fn get_expanded_temp_dir(
         ShellType::Sh => unreachable!(),
     };
 
-    let output = executor::run_remote(host, &echo_cmd, timeout).await?;
+    let output = executor::run_remote_pooled(host, &echo_cmd, timeout, socket).await?;
 
     if !output.success {
         bail!("Failed to get temp directory: {}", output.stderr.trim());
