@@ -34,6 +34,9 @@ pub struct Settings {
     #[serde(default = "default_concurrency")]
     pub max_concurrency: usize,
 
+    #[serde(default = "default_per_host_concurrency")]
+    pub max_per_host_concurrency: usize,
+
     /// Hosts to skip during init (persisted across re-init)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_hosts: Vec<String>,
@@ -52,6 +55,7 @@ impl Default for Settings {
             conflict_strategy: default_conflict_strategy(),
             propagate_deletes: false,
             max_concurrency: default_concurrency(),
+            max_per_host_concurrency: default_per_host_concurrency(),
             skipped_hosts: Vec::new(),
             state_dir: None,
         }
@@ -69,6 +73,9 @@ fn default_conflict_strategy() -> ConflictStrategy {
 }
 fn default_concurrency() -> usize {
     10
+}
+fn default_per_host_concurrency() -> usize {
+    4
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -145,4 +152,22 @@ pub struct SyncEntry {
     /// Fixed source host — bypass automatic source selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_per_host_concurrency_default() {
+        let settings = Settings::default();
+        assert_eq!(settings.max_per_host_concurrency, 4);
+    }
+
+    #[test]
+    fn test_per_host_concurrency_from_toml() {
+        let toml_str = "max_per_host_concurrency = 8";
+        let settings: Settings = toml::from_str(toml_str).unwrap();
+        assert_eq!(settings.max_per_host_concurrency, 8);
+    }
 }
