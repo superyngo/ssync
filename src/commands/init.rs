@@ -84,7 +84,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
 
         // Report unreachable hosts
         for (name, err) in conn_mgr.failed_hosts() {
-            printer::print_host_line(&name, "error", &format!("{}", err));
+            printer::print_host_line(&name, "error", &err.to_string());
             summary.add_failure(&name, &err);
         }
 
@@ -147,8 +147,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         }
 
         // Merge with existing config
-        let mut config =
-            crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
         for host in new_hosts {
             if let Some(existing) = config.host.iter_mut().find(|h| h.ssh_host == host.ssh_host) {
                 existing.shell = host.shell;
@@ -179,8 +178,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
             return Ok(());
         }
 
-        let mut config =
-            crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
         for s in &skip {
             if !config.settings.skipped_hosts.contains(s) {
                 config.settings.skipped_hosts.push(s.clone());

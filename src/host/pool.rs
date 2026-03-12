@@ -18,6 +18,7 @@ pub struct SshPool {
 }
 
 /// Result of a per-host operation executed through the pool.
+#[allow(dead_code)]
 pub struct PoolHostResult<T> {
     pub host_name: String,
     pub result: Result<T>,
@@ -60,6 +61,7 @@ impl SshPool {
     }
 
     /// Get names of all reachable hosts.
+    #[allow(dead_code)]
     pub fn reachable_hosts(&self) -> Vec<String> {
         self.conn_mgr.reachable_hosts()
     }

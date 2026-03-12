@@ -17,6 +17,7 @@ pub struct CollectionResult {
 
 /// Collect all enabled metrics from a remote host.
 /// Returns a CollectionResult tracking per-metric success/failure.
+#[allow(dead_code)]
 pub async fn collect(
     host: &HostEntry,
     enabled: &[String],

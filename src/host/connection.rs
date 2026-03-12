@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -105,11 +103,13 @@ impl ConnectionManager {
     }
 
     /// Get the connection state for a host.
+    #[allow(dead_code)]
     pub fn state(&self, host_name: &str) -> Option<&ConnectionState> {
         self.hosts.get(host_name)
     }
 
     /// Get all host connection states.
+    #[allow(dead_code)]
     pub fn all_states(&self) -> &HashMap<String, ConnectionState> {
         &self.hosts
     }

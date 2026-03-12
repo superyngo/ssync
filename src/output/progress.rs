@@ -3,7 +3,6 @@ use std::io::IsTerminal;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-#[allow(dead_code)]
 pub struct SyncProgress {
     is_tty: bool,
     multi: MultiProgress,
@@ -12,7 +11,6 @@ pub struct SyncProgress {
     transfer_bars: HashMap<String, ProgressBar>,
 }
 
-#[allow(dead_code)]
 impl SyncProgress {
     pub fn new() -> Self {
         let is_tty = std::io::stderr().is_terminal();
@@ -38,6 +36,7 @@ impl SyncProgress {
         self.host_bar = Some(bar);
     }
 
+    #[allow(dead_code)]
     pub fn host_checked(&self, connected: usize, failed: usize) {
         if let Some(bar) = &self.host_bar {
             bar.inc(1);

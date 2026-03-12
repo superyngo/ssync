@@ -952,14 +952,12 @@ fn to_tilde_path(path: &str) -> String {
 
 /// Result of batch metadata collection for a single file.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct SingleFileResult {
     found: Option<FileInfo>,
     is_missing: bool,
 }
 
 /// Generate a single shell command that collects stat + hash for ALL files at once.
-#[allow(dead_code)]
 fn build_batch_metadata_cmd(paths: &[String], shell: ShellType) -> String {
     match shell {
         ShellType::PowerShell => {
@@ -1099,14 +1097,13 @@ fn parse_batch_metadata_output(
     result
 }
 
-#[allow(dead_code)]
 struct BatchCollectResult {
     per_file: HashMap<String, CollectResult>,
+    #[allow(dead_code)]
     unreachable_hosts: Vec<String>,
 }
 
 /// Stage 1 (Batched): Collect metadata for ALL files from all hosts with one SSH call per host.
-#[allow(dead_code)]
 async fn batch_collect_all_metadata(
     hosts: &[&HostEntry],
     paths: &[String],

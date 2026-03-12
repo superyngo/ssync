@@ -7,6 +7,7 @@ use crate::config::schema::ShellType;
 use crate::host::executor;
 
 /// Detect the shell type of a remote host by trying common commands.
+#[allow(dead_code)]
 pub async fn detect(host_ssh: &str, timeout_secs: u64) -> Result<ShellType> {
     use std::process::Stdio;
     use tokio::process::Command;

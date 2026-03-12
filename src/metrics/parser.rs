@@ -72,7 +72,7 @@ pub fn parse_batch_paths(
 }
 
 /// Split output by `PREFIX<name>` markers into (name, content) pairs.
-fn split_by_marker<'a>(output: &'a str, prefix: &str) -> Vec<(String, String)> {
+fn split_by_marker(output: &str, prefix: &str) -> Vec<(String, String)> {
     let mut results = Vec::new();
     let mut current_name: Option<String> = None;
     let mut current_lines: Vec<&str> = Vec::new();

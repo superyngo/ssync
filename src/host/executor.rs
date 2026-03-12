@@ -111,7 +111,6 @@ pub async fn download(
 }
 
 /// Build common SSH args including optional ControlPath.
-#[allow(dead_code)]
 fn ssh_base_args(host: &HostEntry, timeout_secs: u64, socket: Option<&Path>) -> Vec<String> {
     let _ = host; // host reserved for future per-host arg customisation
     let mut args = vec![
@@ -128,7 +127,6 @@ fn ssh_base_args(host: &HostEntry, timeout_secs: u64, socket: Option<&Path>) -> 
 }
 
 /// Execute a command on a remote host, optionally reusing a ControlMaster socket.
-#[allow(dead_code)]
 pub async fn run_remote_pooled(
     host: &HostEntry,
     command: &str,
@@ -160,7 +158,6 @@ pub async fn run_remote_pooled(
 }
 
 /// Upload a file via scp, optionally reusing a ControlMaster socket.
-#[allow(dead_code)]
 pub async fn upload_pooled(
     host: &HostEntry,
     local_path: &Path,
@@ -191,7 +188,6 @@ pub async fn upload_pooled(
 }
 
 /// Download a file via scp, optionally reusing a ControlMaster socket.
-#[allow(dead_code)]
 pub async fn download_pooled(
     host: &HostEntry,
     remote_path: &str,

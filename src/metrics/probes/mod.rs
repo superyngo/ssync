@@ -5,6 +5,7 @@ pub mod sh;
 use crate::config::schema::ShellType;
 
 /// Get the probe command for a given shell and metric.
+#[allow(dead_code)]
 pub fn command_for(shell: ShellType, metric: &str) -> String {
     match shell {
         ShellType::Sh => sh::command_for(metric),
@@ -14,6 +15,7 @@ pub fn command_for(shell: ShellType, metric: &str) -> String {
 }
 
 /// Get the command to measure path size.
+#[allow(dead_code)]
 pub fn path_size_command(shell: ShellType, path: &str) -> String {
     match shell {
         ShellType::Sh => format!("du -sb {} 2>/dev/null", path),

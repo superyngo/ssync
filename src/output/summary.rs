@@ -1,6 +1,5 @@
 /// Reason for skipping a file during sync.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct SkipReason {
     pub path: String,
     pub host: String,
@@ -31,7 +30,6 @@ impl Summary {
         self.skipped += 1;
     }
 
-    #[allow(dead_code)]
     pub fn add_skip_with_reason(&mut self, path: &str, host: &str, reason: &str) {
         self.skipped += 1;
         self.skip_reasons.push(SkipReason {
