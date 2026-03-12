@@ -5,6 +5,7 @@ use anyhow::Result;
 use tokio::sync::Semaphore;
 
 use crate::config::schema::{ConflictStrategy, HostEntry, ShellType};
+use crate::host::connection::ConnectionManager;
 use crate::host::executor;
 use crate::output::printer;
 use crate::output::summary::Summary;
@@ -788,6 +789,97 @@ fn parse_batch_metadata_output(
     }
 
     result
+}
+
+#[allow(dead_code)]
+struct BatchCollectResult {
+    per_file: HashMap<String, CollectResult>,
+    unreachable_hosts: Vec<String>,
+}
+
+/// Stage 1 (Batched): Collect metadata for ALL files from all hosts with one SSH call per host.
+#[allow(dead_code)]
+async fn batch_collect_all_metadata(
+    hosts: &[&HostEntry],
+    paths: &[String],
+    timeout: u64,
+    concurrency: usize,
+    conn_mgr: &ConnectionManager,
+) -> Result<BatchCollectResult> {
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut handles = Vec::new();
+
+    let mut skipped_unreachable: Vec<String> = Vec::new();
+
+    for host in hosts {
+        let socket = match conn_mgr.socket_for(&host.name) {
+            Some(s) => Some(s.to_path_buf()),
+            None => {
+                skipped_unreachable.push(host.name.clone());
+                continue;
+            }
+        };
+
+        let sem = semaphore.clone();
+        let host = (*host).clone();
+        let paths = paths.to_vec();
+        let cmd = build_batch_metadata_cmd(&paths, host.shell);
+
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let result = executor::run_remote_pooled(
+                &host,
+                &cmd,
+                timeout,
+                socket.as_deref(),
+            )
+            .await;
+
+            match result {
+                Ok(output) if output.success => {
+                    let parsed = parse_batch_metadata_output(&output.stdout, &paths, &host.name);
+                    (host.name.clone(), Some(parsed), false)
+                }
+                _ => (host.name.clone(), None, true),
+            }
+        }));
+    }
+
+    let mut per_file: HashMap<String, CollectResult> = HashMap::new();
+    for path in paths {
+        per_file.insert(
+            path.clone(),
+            CollectResult {
+                found: Vec::new(),
+                missing: Vec::new(),
+            },
+        );
+    }
+    let mut unreachable_hosts = skipped_unreachable;
+
+    for handle in handles {
+        let (host_name, parsed_opt, is_unreachable) = handle.await?;
+        if is_unreachable {
+            unreachable_hosts.push(host_name);
+            continue;
+        }
+        if let Some(parsed) = parsed_opt {
+            for (path, single) in parsed {
+                if let Some(collect) = per_file.get_mut(&path) {
+                    if let Some(fi) = single.found {
+                        collect.found.push(fi);
+                    } else if single.is_missing {
+                        collect.missing.push(host_name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(BatchCollectResult {
+        per_file,
+        unreachable_hosts,
+    })
 }
 
 #[cfg(test)]
