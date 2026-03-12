@@ -39,6 +39,9 @@ struct SyncDecision {
     reason: String,
 }
 
+/// Info about a skipped path: `(source_host, path)`.
+type SkipInfo = Option<(String, String)>;
+
 pub async fn run(
     ctx: &Context,
     dry_run: bool,
@@ -142,13 +145,19 @@ async fn sync_path_across(
     // Stage 2: Decide which version to use
     let decisions = if let Some(src) = source_override {
         // Fixed source: bypass automatic selection
-        make_decisions_fixed_source(
+        let (decs, skip_info) = make_decisions_fixed_source(
             &collect_result.found,
             path,
             push_missing,
             &collect_result.missing,
             src,
-        )?
+        )?;
+        if let Some((source, skipped_path)) = skip_info {
+            printer::print_host_line("skip", &source, &format!("does not have '{}'", skipped_path));
+            summary.add_skip_with_reason(&skipped_path, &source, &format!("source '{}' does not have '{}'", source, skipped_path));
+            return Ok(());
+        }
+        decs
     } else {
         make_decisions(
             &collect_result.found,
@@ -468,25 +477,26 @@ fn make_decisions(
 }
 
 /// Make sync decisions using a fixed source host (bypasses conflict strategy).
+///
+/// Returns `(decisions, skip_info)`. When the source host is not found in `file_infos`,
+/// the function returns empty decisions and `Some((source_name, path))` so the caller
+/// can report a skip instead of aborting the entire sync run.
 fn make_decisions_fixed_source(
     file_infos: &[FileInfo],
     path: &str,
     push_missing: bool,
     missing_hosts: &[String],
     source_name: &str,
-) -> Result<Vec<SyncDecision>> {
-    let source = file_infos
-        .iter()
-        .find(|f| f.host == source_name)
-        .ok_or_else(|| {
-            let available: Vec<&str> = file_infos.iter().map(|f| f.host.as_str()).collect();
-            anyhow::anyhow!(
-                "Source host '{}' has no data for '{}'. Available: [{}]",
-                source_name,
-                path,
-                available.join(", ")
-            )
-        })?;
+) -> Result<(Vec<SyncDecision>, SkipInfo)> {
+    let source = match file_infos.iter().find(|f| f.host == source_name) {
+        Some(s) => s,
+        None => {
+            return Ok((
+                Vec::new(),
+                Some((source_name.to_string(), path.to_string())),
+            ));
+        }
+    };
 
     let mut targets: Vec<String> = file_infos
         .iter()
@@ -504,7 +514,7 @@ fn make_decisions_fixed_source(
     }
 
     if targets.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let synced_hosts: Vec<String> = file_infos
@@ -518,13 +528,16 @@ fn make_decisions_fixed_source(
         reason.push_str(&format!(", +{} missing", missing_hosts.len()));
     }
 
-    Ok(vec![SyncDecision {
-        path: path.to_string(),
-        source_host: source.host.clone(),
-        target_hosts: targets,
-        synced_hosts,
-        reason,
-    }])
+    Ok((
+        vec![SyncDecision {
+            path: path.to_string(),
+            source_host: source.host.clone(),
+            target_hosts: targets,
+            synced_hosts,
+            reason,
+        }],
+        None,
+    ))
 }
 
 /// Stage 3: Distribute file from source to targets via local relay.
@@ -619,4 +632,58 @@ fn to_tilde_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_file_info(host: &str, path: &str, hash: &str) -> FileInfo {
+        FileInfo {
+            host: host.to_string(),
+            path: path.to_string(),
+            mtime: 1000,
+            size: 100,
+            hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_fixed_source_missing_returns_empty_not_error() {
+        let infos = vec![
+            make_file_info("host-b", "~/.bashrc", "abc123"),
+            make_file_info("host-c", "~/.bashrc", "def456"),
+        ];
+        let missing: Vec<String> = vec![];
+        let result =
+            make_decisions_fixed_source(&infos, "~/.bashrc", false, &missing, "host-a");
+        assert!(result.is_ok(), "should not return an error");
+        let (decisions, skip_info) = result.unwrap();
+        assert!(decisions.is_empty(), "decisions should be empty");
+        assert!(skip_info.is_some(), "skip_info should be Some");
+        let (source, path) = skip_info.unwrap();
+        assert_eq!(source, "host-a");
+        assert_eq!(path, "~/.bashrc");
+    }
+
+    #[test]
+    fn test_fixed_source_present_works_normally() {
+        let infos = vec![
+            make_file_info("host-a", "~/.bashrc", "abc123"),
+            make_file_info("host-b", "~/.bashrc", "def456"),
+            make_file_info("host-c", "~/.bashrc", "abc123"),
+        ];
+        let missing: Vec<String> = vec![];
+        let result =
+            make_decisions_fixed_source(&infos, "~/.bashrc", false, &missing, "host-a");
+        assert!(result.is_ok());
+        let (decisions, skip_info) = result.unwrap();
+        assert!(skip_info.is_none(), "skip_info should be None when source is found");
+        assert_eq!(decisions.len(), 1);
+        let d = &decisions[0];
+        assert_eq!(d.source_host, "host-a");
+        assert_eq!(d.target_hosts, vec!["host-b".to_string()]);
+        assert_eq!(d.synced_hosts, vec!["host-c".to_string()]);
+        assert!(d.reason.contains("fixed source: host-a"));
+    }
 }
