@@ -8,6 +8,7 @@ use crate::config::schema::{ConflictStrategy, HostEntry, ShellType};
 use crate::host::concurrency::ConcurrencyLimiter;
 use crate::host::connection::ConnectionManager;
 use crate::host::executor;
+use crate::host::pool::SshPool;
 use crate::output::printer;
 use crate::output::progress::SyncProgress;
 use crate::output::summary::Summary;
@@ -56,7 +57,6 @@ pub async fn run(
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
     let mut summary = Summary::default();
-    let mut progress = SyncProgress::new();
 
     // Step 1: Collect all file paths, separating recursive from non-recursive
     let (all_paths, recursive_entries) = if !files.is_empty() {
@@ -97,55 +97,50 @@ pub async fn run(
     };
     println!("\n── Sync: {} ──", label);
 
-    // Step 2: Pre-check SSH connections via ControlMaster
-    let mut conn_mgr = ConnectionManager::new()?;
-    progress.start_host_check(hosts.len());
-    let connected = conn_mgr
-        .pre_check(&hosts, ctx.timeout, ctx.concurrency())
-        .await;
-    let failed_count = hosts.len() - connected;
-    progress.finish_host_check(connected, failed_count);
+    // Step 2: Pre-check SSH connections via SshPool
+    let (mut pool, _connected) = SshPool::setup(
+        &hosts,
+        ctx.timeout,
+        ctx.concurrency(),
+        ctx.per_host_concurrency(),
+    )
+    .await?;
 
-    for (name, err) in conn_mgr.failed_hosts() {
+    for (name, err) in pool.failed_hosts() {
         printer::print_host_line("unreachable", "error", &format!("{}: {}", name, err));
         summary.add_failure(&name, &err);
     }
 
     // Step 3: Filter to reachable hosts
     if let Some(src) = cli_source {
-        if conn_mgr.socket_for(src).is_none() {
-            conn_mgr.shutdown().await;
+        if pool.socket_for(src).is_none() {
+            pool.shutdown().await;
             anyhow::bail!("Source host '{}' is unreachable", src);
         }
     }
-    let reachable_names = conn_mgr.reachable_hosts();
-    let reachable_hosts: Vec<&HostEntry> = hosts
-        .iter()
-        .filter(|h| reachable_names.contains(&h.name))
-        .copied()
-        .collect();
+    let reachable_hosts = pool.filter_reachable(&hosts);
 
     if reachable_hosts.len() < 2 && !all_paths.is_empty() {
         println!(
             "Need at least 2 reachable hosts for sync (found {})",
             reachable_hosts.len()
         );
-        conn_mgr.shutdown().await;
+        pool.shutdown().await;
         return Ok(());
     }
 
     // Step 4: Batch collect metadata for non-recursive files
     if !all_paths.is_empty() {
-        progress.start_collect(reachable_hosts.len());
+        pool.progress.start_collect(reachable_hosts.len());
         let batch_result = batch_collect_all_metadata(
             &reachable_hosts,
             &all_paths,
             ctx.timeout,
             ctx.concurrency(),
-            &conn_mgr,
+            &pool.conn_mgr,
         )
         .await?;
-        progress.finish_collect();
+        pool.progress.finish_collect();
 
         // Step 5: Make decisions per file
         let mut all_decisions: Vec<SyncDecision> = Vec::new();
@@ -225,13 +220,6 @@ pub async fn run(
                 println!("  [dry-run] No changes applied.");
             }
         } else {
-            let host_names: Vec<String> = reachable_hosts.iter().map(|h| h.name.clone()).collect();
-            let limiter = ConcurrencyLimiter::new(
-                ctx.concurrency(),
-                ctx.config.settings.max_per_host_concurrency,
-                &host_names,
-            );
-
             for decision in &all_decisions {
                 let mut all_targets: Vec<&str> =
                     decision.synced_hosts.iter().map(|s| s.as_str()).collect();
@@ -247,15 +235,16 @@ pub async fn run(
                     printer::print_host_line("passed", "ok", &decision.synced_hosts.join(", "));
                 }
 
-                progress.start_transfer(&decision.path, decision.target_hosts.len());
+                pool.progress
+                    .start_transfer(&decision.path, decision.target_hosts.len());
 
                 match distribute_pooled(
                     &reachable_hosts,
                     decision,
                     ctx.timeout,
-                    &limiter,
-                    &conn_mgr,
-                    &progress,
+                    &pool.limiter,
+                    &pool.conn_mgr,
+                    &pool.progress,
                 )
                 .await
                 {
@@ -305,7 +294,7 @@ pub async fn run(
                     }
                 }
 
-                progress.finish_transfer(&decision.path);
+                pool.progress.finish_transfer(&decision.path);
             }
         }
     }
@@ -328,8 +317,7 @@ pub async fn run(
     }
 
     // Cleanup
-    progress.clear();
-    conn_mgr.shutdown().await;
+    pool.shutdown().await;
 
     summary.print();
     Ok(())
