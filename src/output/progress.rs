@@ -25,41 +25,41 @@ impl SyncProgress {
         }
     }
 
-    pub fn start_host_check(&mut self, total: u64) {
+    pub fn start_host_check(&mut self, total: usize) {
         if !self.is_tty {
             return;
         }
         let style = ProgressStyle::default_bar()
             .template(" {prefix:>12} {bar:30.cyan/dim} {pos}/{len} {msg}")
             .expect("valid template");
-        let bar = self.multi.add(ProgressBar::new(total));
+        let bar = self.multi.add(ProgressBar::new(total as u64));
         bar.set_style(style);
         bar.set_prefix("Hosts");
         self.host_bar = Some(bar);
     }
 
-    pub fn host_checked(&self, connected: u64, failed: u64) {
+    pub fn host_checked(&self, connected: usize, failed: usize) {
         if let Some(bar) = &self.host_bar {
             bar.inc(1);
             bar.set_message(format!("{connected} ok, {failed} failed"));
         }
     }
 
-    pub fn finish_host_check(&mut self, connected: u64, failed: u64) {
+    pub fn finish_host_check(&mut self, connected: usize, failed: usize) {
         if let Some(bar) = self.host_bar.take() {
             bar.set_message(format!("{connected} ok, {failed} failed"));
             bar.finish();
         }
     }
 
-    pub fn start_collect(&mut self, total: u64) {
+    pub fn start_collect(&mut self, total: usize) {
         if !self.is_tty {
             return;
         }
         let style = ProgressStyle::default_bar()
             .template(" {prefix:>12} {bar:30.green/dim} {pos}/{len} {msg}")
             .expect("valid template");
-        let bar = self.multi.add(ProgressBar::new(total));
+        let bar = self.multi.add(ProgressBar::new(total as u64));
         bar.set_style(style);
         bar.set_prefix("Collecting");
         self.collect_bar = Some(bar);
@@ -77,14 +77,14 @@ impl SyncProgress {
         }
     }
 
-    pub fn start_transfer(&mut self, path: &str, total_targets: u64) {
+    pub fn start_transfer(&mut self, path: &str, total_targets: usize) {
         if !self.is_tty {
             return;
         }
         let style = ProgressStyle::default_bar()
             .template(" {prefix:>12} {bar:30.yellow/dim} {pos}/{len} {msg}")
             .expect("valid template");
-        let bar = self.multi.add(ProgressBar::new(total_targets));
+        let bar = self.multi.add(ProgressBar::new(total_targets as u64));
         bar.set_style(style);
         bar.set_prefix("Transfer");
         bar.set_message(path.to_string());

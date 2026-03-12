@@ -5,9 +5,11 @@ use anyhow::Result;
 use tokio::sync::Semaphore;
 
 use crate::config::schema::{ConflictStrategy, HostEntry, ShellType};
+use crate::host::concurrency::ConcurrencyLimiter;
 use crate::host::connection::ConnectionManager;
 use crate::host::executor;
 use crate::output::printer;
+use crate::output::progress::SyncProgress;
 use crate::output::summary::Summary;
 
 use super::Context;
@@ -53,41 +55,37 @@ pub async fn run(
 ) -> Result<()> {
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
+    let mut summary = Summary::default();
+    let mut progress = SyncProgress::new();
 
-    // Ad-hoc file mode: --files/-f
-    if !files.is_empty() {
-        let mut total_summary = Summary::default();
-        println!("\n── Sync: ad-hoc files ──");
-        for path in files {
-            // If the shell expanded ~/path to an absolute path under $HOME, convert it back
-            // so the same tilde-relative path is used consistently on all remote hosts.
-            let tilde_path = to_tilde_path(path);
-            sync_path_across(
-                ctx,
-                &hosts,
-                &tilde_path,
-                "ad-hoc",
-                dry_run,
-                push_missing,
-                cli_source,
-                &mut total_summary,
-            )
-            .await?;
+    // Step 1: Collect all file paths, separating recursive from non-recursive
+    let (all_paths, recursive_entries) = if !files.is_empty() {
+        let paths: Vec<String> = files.iter().map(|p| to_tilde_path(p)).collect();
+        (paths, Vec::new())
+    } else {
+        let sync_entries = ctx.resolve_syncs();
+        if sync_entries.is_empty() {
+            println!("No sync entries matched the current filter. Add [[sync]] to config.toml or use --files/-f.");
+            return Ok(());
         }
-        total_summary.print();
-        return Ok(());
-    }
+        let mut paths = Vec::new();
+        let mut recursive = Vec::new();
+        for entry in sync_entries {
+            let effective_source = cli_source.or(entry.source.as_deref());
+            if entry.recursive {
+                recursive.push((entry, effective_source));
+            } else {
+                for p in &entry.paths {
+                    if !paths.contains(p) {
+                        paths.push(p.clone());
+                    }
+                }
+            }
+        }
+        (paths, recursive)
+    };
 
-    // Config-based sync
-    let sync_entries = ctx.resolve_syncs();
-    if sync_entries.is_empty() {
-        println!("No sync entries matched the current filter. Add [[sync]] to config.toml or use --files/-f.");
-        return Ok(());
-    }
-
-    let mut total_summary = Summary::default();
-
-    if hosts.len() < 2 {
+    if hosts.len() < 2 && (!all_paths.is_empty() || !recursive_entries.is_empty()) {
         println!("Need at least 2 hosts for sync (found {})", hosts.len());
         return Ok(());
     }
@@ -98,25 +96,257 @@ pub async fn run(
         super::TargetMode::Hosts(h) => h.join(", "),
     };
     println!("\n── Sync: {} ──", label);
-    for sync_entry in sync_entries {
-        // CLI --source takes priority, then config source
-        let effective_source = cli_source.or(sync_entry.source.as_deref());
-        for path in &sync_entry.paths {
+
+    // Step 2: Pre-check SSH connections via ControlMaster
+    let mut conn_mgr = ConnectionManager::new()?;
+    progress.start_host_check(hosts.len());
+    let connected = conn_mgr
+        .pre_check(&hosts, ctx.timeout, ctx.concurrency())
+        .await;
+    let failed_count = hosts.len() - connected;
+    progress.finish_host_check(connected, failed_count);
+
+    for (name, err) in conn_mgr.failed_hosts() {
+        printer::print_host_line("unreachable", "error", &format!("{}: {}", name, err));
+        summary.add_failure(&name, &err);
+    }
+
+    // Step 3: Filter to reachable hosts
+    if let Some(src) = cli_source {
+        if conn_mgr.socket_for(src).is_none() {
+            conn_mgr.shutdown().await;
+            anyhow::bail!("Source host '{}' is unreachable", src);
+        }
+    }
+    let reachable_names = conn_mgr.reachable_hosts();
+    let reachable_hosts: Vec<&HostEntry> = hosts
+        .iter()
+        .filter(|h| reachable_names.contains(&h.name))
+        .copied()
+        .collect();
+
+    if reachable_hosts.len() < 2 && !all_paths.is_empty() {
+        println!(
+            "Need at least 2 reachable hosts for sync (found {})",
+            reachable_hosts.len()
+        );
+        conn_mgr.shutdown().await;
+        return Ok(());
+    }
+
+    // Step 4: Batch collect metadata for non-recursive files
+    if !all_paths.is_empty() {
+        progress.start_collect(reachable_hosts.len());
+        let batch_result = batch_collect_all_metadata(
+            &reachable_hosts,
+            &all_paths,
+            ctx.timeout,
+            ctx.concurrency(),
+            &conn_mgr,
+        )
+        .await?;
+        progress.finish_collect();
+
+        // Step 5: Make decisions per file
+        let mut all_decisions: Vec<SyncDecision> = Vec::new();
+        for path in &all_paths {
+            if let Some(collect) = batch_result.per_file.get(path) {
+                if collect.found.is_empty() {
+                    if !collect.missing.is_empty() {
+                        println!("  {}: file not found on any reachable host", path);
+                    } else {
+                        println!("  {}: no data collected", path);
+                    }
+                    continue;
+                }
+
+                let decisions = if let Some(src) = cli_source {
+                    let (decs, skip_info) = make_decisions_fixed_source(
+                        &collect.found,
+                        path,
+                        push_missing,
+                        &collect.missing,
+                        src,
+                    )?;
+                    if let Some((source, skipped_path)) = skip_info {
+                        printer::print_host_line(
+                            "skip",
+                            &source,
+                            &format!("does not have '{}'", skipped_path),
+                        );
+                        summary.add_skip_with_reason(
+                            &skipped_path,
+                            &source,
+                            &format!("source '{}' does not have '{}'", source, skipped_path),
+                        );
+                        continue;
+                    }
+                    decs
+                } else {
+                    make_decisions(
+                        &collect.found,
+                        &ctx.config.settings.conflict_strategy,
+                        path,
+                        push_missing,
+                        &collect.missing,
+                    )
+                };
+
+                if decisions.is_empty() {
+                    let hosts_list: Vec<&str> =
+                        collect.found.iter().map(|f| f.host.as_str()).collect();
+                    println!("  {} (all in sync)", path);
+                    printer::print_host_line("passed", "ok", &hosts_list.join(", "));
+                    summary.add_success();
+                } else {
+                    all_decisions.extend(decisions);
+                }
+            }
+        }
+
+        // Step 6: Distribute all files
+        if dry_run {
+            for d in &all_decisions {
+                let mut all_targets: Vec<&str> =
+                    d.synced_hosts.iter().map(|s| s.as_str()).collect();
+                all_targets.extend(d.target_hosts.iter().map(|s| s.as_str()));
+                println!(
+                    "  {} → source: {} → targets: [{}] ({})",
+                    d.path,
+                    d.source_host,
+                    all_targets.join(", "),
+                    d.reason
+                );
+                if !d.synced_hosts.is_empty() {
+                    printer::print_host_line("passed", "ok", &d.synced_hosts.join(", "));
+                }
+            }
+            if !all_decisions.is_empty() {
+                println!("  [dry-run] No changes applied.");
+            }
+        } else {
+            let host_names: Vec<String> =
+                reachable_hosts.iter().map(|h| h.name.clone()).collect();
+            let limiter = ConcurrencyLimiter::new(
+                ctx.concurrency(),
+                ctx.config.settings.max_per_host_concurrency,
+                &host_names,
+            );
+
+            for decision in &all_decisions {
+                let mut all_targets: Vec<&str> =
+                    decision.synced_hosts.iter().map(|s| s.as_str()).collect();
+                all_targets.extend(decision.target_hosts.iter().map(|s| s.as_str()));
+                println!(
+                    "  {} → source: {} → targets: [{}] ({})",
+                    decision.path,
+                    decision.source_host,
+                    all_targets.join(", "),
+                    decision.reason
+                );
+                if !decision.synced_hosts.is_empty() {
+                    printer::print_host_line("passed", "ok", &decision.synced_hosts.join(", "));
+                }
+
+                progress.start_transfer(
+                    &decision.path,
+                    decision.target_hosts.len(),
+                );
+
+                match distribute_pooled(
+                    &reachable_hosts,
+                    decision,
+                    ctx.timeout,
+                    &limiter,
+                    &conn_mgr,
+                    &progress,
+                )
+                .await
+                {
+                    Ok((succeeded, failed_uploads)) => {
+                        if !succeeded.is_empty() {
+                            printer::print_host_line(
+                                "synced",
+                                "ok",
+                                &succeeded.join(", "),
+                            );
+                            summary.add_success();
+
+                            let now = chrono::Utc::now().timestamp();
+                            for target in &succeeded {
+                                let _ = ctx.db.execute(
+                                    "INSERT INTO sync_state (sync_group, host, path, mtime, size_bytes, blake3, synced_at) \
+                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                                     ON CONFLICT(sync_group, host, path) DO UPDATE SET mtime=?4, size_bytes=?5, blake3=?6, synced_at=?7",
+                                    rusqlite::params![
+                                        label, target, decision.path,
+                                        0i64, 0i64, "", now
+                                    ],
+                                );
+                            }
+
+                            let _ = ctx.db.execute(
+                                "INSERT INTO operation_log (timestamp, command, host, action, status, duration_ms) \
+                                 VALUES (?1, 'sync', ?2, ?3, 'ok', 0)",
+                                rusqlite::params![
+                                    now,
+                                    decision.source_host,
+                                    format!("sync {}", decision.path)
+                                ],
+                            );
+                        }
+
+                        if !failed_uploads.is_empty() {
+                            let failed_names: Vec<&str> =
+                                failed_uploads.iter().map(|(n, _)| n.as_str()).collect();
+                            printer::print_host_line(
+                                "failed",
+                                "error",
+                                &failed_names.join(", "),
+                            );
+                            for (target, err) in &failed_uploads {
+                                println!("    {}: {}", target, err);
+                                summary.add_failure(target, err);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        printer::print_host_line("failed", "error", &decision.source_host);
+                        println!(
+                            "    {}: download failed: {}",
+                            decision.source_host, e
+                        );
+                        summary.add_failure(&decision.source_host, &e.to_string());
+                    }
+                }
+
+                progress.finish_transfer(&decision.path);
+            }
+        }
+    }
+
+    // Handle recursive entries with existing per-file flow (unchanged)
+    for (entry, effective_source) in &recursive_entries {
+        for path in &entry.paths {
             sync_path_across(
                 ctx,
-                &hosts,
+                &reachable_hosts,
                 path,
                 &label,
                 dry_run,
                 push_missing,
-                effective_source,
-                &mut total_summary,
+                *effective_source,
+                &mut summary,
             )
             .await?;
         }
     }
 
-    total_summary.print();
+    // Cleanup
+    progress.clear();
+    conn_mgr.shutdown().await;
+
+    summary.print();
     Ok(())
 }
 
@@ -618,7 +848,120 @@ async fn distribute(
     Ok((succeeded, failed))
 }
 
-/// Convert an absolute path back to a tilde-relative path if it falls under $HOME.
+/// Stage 3 (Pooled): Distribute file from source to targets via local relay,
+/// using ControlMaster sockets and dual-level concurrency limiter.
+async fn distribute_pooled(
+    hosts: &[&HostEntry],
+    decision: &SyncDecision,
+    timeout: u64,
+    limiter: &ConcurrencyLimiter,
+    conn_mgr: &ConnectionManager,
+    progress: &SyncProgress,
+) -> Result<(Vec<String>, Vec<(String, String)>)> {
+    let source = hosts
+        .iter()
+        .find(|h| h.name == decision.source_host)
+        .ok_or_else(|| anyhow::anyhow!("Source host not found: {}", decision.source_host))?;
+
+    // Download from source using pooled connection
+    let temp_dir = tempfile::tempdir()?;
+    let local_temp = temp_dir.path().join("ssync_relay");
+    let source_socket = conn_mgr.socket_for(&source.name);
+    {
+        let _permit = limiter.acquire(&source.name).await;
+        executor::download_pooled(
+            source,
+            &decision.path,
+            &local_temp,
+            timeout,
+            source_socket,
+        )
+        .await?;
+    }
+
+    // Upload to all targets in parallel with concurrency limiter
+    let mut handles = Vec::new();
+
+    for target_name in &decision.target_hosts {
+        let target = hosts
+            .iter()
+            .find(|h| h.name == *target_name)
+            .ok_or_else(|| anyhow::anyhow!("Target host not found: {}", target_name))?;
+
+        let target = (*target).clone();
+        let local_temp = local_temp.clone();
+        let remote_path = decision.path.clone();
+        let target_name = target_name.clone();
+        let socket = conn_mgr.socket_for(&target.name).map(|p| p.to_path_buf());
+
+        // We need references to limiter, but can't move them into spawn.
+        // Use Arc for the limiter's semaphores (they're already Arc internally).
+        // Instead, acquire permit inside the task.
+        let limiter_global = limiter.global_semaphore();
+        let limiter_per_host = limiter
+            .per_host_semaphore(&target.name)
+            .expect("target not registered");
+
+        handles.push(tokio::spawn(async move {
+            // Acquire permits: global first, then per-host
+            let _global_permit = limiter_global.acquire().await.unwrap();
+            let _per_host_permit = limiter_per_host.acquire().await.unwrap();
+
+            // Ensure parent directory exists on target
+            let parent = std::path::Path::new(&remote_path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !parent.is_empty() && parent != "/" && !parent.starts_with('~') {
+                let mkdir_cmd = format!("mkdir -p '{}'", parent.replace('\'', "'\\''"));
+                let _ = executor::run_remote_pooled(
+                    &target,
+                    &mkdir_cmd,
+                    timeout,
+                    socket.as_deref(),
+                )
+                .await;
+            } else if parent.starts_with("~/") || parent == "~" {
+                let sub = if parent == "~" {
+                    ""
+                } else {
+                    &parent[2..]
+                };
+                if !sub.is_empty() {
+                    let mkdir_cmd =
+                        format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\""));
+                    let _ = executor::run_remote_pooled(
+                        &target,
+                        &mkdir_cmd,
+                        timeout,
+                        socket.as_deref(),
+                    )
+                    .await;
+                }
+            }
+
+            let result =
+                executor::upload_pooled(&target, &local_temp, &remote_path, timeout, socket.as_deref())
+                    .await;
+            (target_name, result)
+        }));
+    }
+
+    let mut succeeded = Vec::new();
+    let mut failed = Vec::new();
+    for handle in handles {
+        let (target_name, result) = handle.await?;
+        match result {
+            Ok(()) => {
+                succeeded.push(target_name.clone());
+                progress.target_transferred(&decision.path);
+            }
+            Err(e) => failed.push((target_name, e.to_string())),
+        }
+    }
+
+    Ok((succeeded, failed))
+}
 /// This handles the case where the shell expands `~/foo` → `/home/user/foo` before
 /// ssync receives it — remotes need the tilde form so it resolves to *their* home dir.
 fn to_tilde_path(path: &str) -> String {

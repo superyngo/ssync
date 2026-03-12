@@ -38,6 +38,16 @@ impl ConcurrencyLimiter {
             _per_host: per_host_permit,
         }
     }
+
+    /// Get a clone of the global semaphore (for use in spawned tasks).
+    pub fn global_semaphore(&self) -> Arc<Semaphore> {
+        self.global.clone()
+    }
+
+    /// Get a clone of a per-host semaphore (for use in spawned tasks).
+    pub fn per_host_semaphore(&self, host: &str) -> Option<Arc<Semaphore>> {
+        self.per_host.get(host).cloned()
+    }
 }
 
 /// RAII guard that holds both global and per-host semaphore permits.
