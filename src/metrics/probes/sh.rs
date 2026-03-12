@@ -22,3 +22,34 @@ pub fn command_for(metric: &str) -> String {
         _ => String::new(),
     }
 }
+
+/// Build a single sh command that collects all metrics with `---METRIC:` markers.
+pub fn batch_command(metrics: &[String]) -> String {
+    if metrics.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for metric in metrics {
+        let cmd = command_for(metric);
+        if cmd.is_empty() {
+            continue;
+        }
+        parts.push(format!("echo '---METRIC:{}'; {{ {}; }} 2>&1", metric, cmd));
+    }
+    parts.join("; ")
+}
+
+/// Build a single sh command that measures all path sizes with `---PATH:` markers.
+pub fn batch_path_command(paths: &[(String, String)]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for (path, label) in paths {
+        parts.push(format!(
+            "echo '---PATH:{}'; du -sb {} 2>/dev/null || echo MISSING",
+            label, path
+        ));
+    }
+    parts.join("; ")
+}

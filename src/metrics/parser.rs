@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::config::schema::ShellType;
 use serde_json::Value;
 
@@ -28,6 +30,70 @@ pub fn parse_path_size(_shell: ShellType, stdout: &str) -> u64 {
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
+}
+
+/// Parse batched metric output (split by `---METRIC:name` markers).
+/// Returns a map of metric_name → parsed Value.
+pub fn parse_batch(shell: ShellType, metrics: &[String], stdout: &str) -> HashMap<String, Value> {
+    let mut results = HashMap::new();
+    let blocks = split_by_marker(stdout, "---METRIC:");
+    for (name, content) in &blocks {
+        if metrics.contains(&name.to_string()) {
+            results.insert(name.to_string(), parse(shell, name, content));
+        }
+    }
+    results
+}
+
+/// Parse batched path size output (split by `---PATH:label` markers).
+/// Returns a map of label → Option<size_bytes> (None if MISSING).
+pub fn parse_batch_paths(
+    shell: ShellType,
+    paths: &[(String, String)],
+    stdout: &str,
+) -> HashMap<String, Option<u64>> {
+    let mut results = HashMap::new();
+    let blocks = split_by_marker(stdout, "---PATH:");
+    let label_map: HashMap<&str, &str> = paths
+        .iter()
+        .map(|(p, l)| (l.as_str(), p.as_str()))
+        .collect();
+    for (label, content) in &blocks {
+        if label_map.contains_key(label.as_str()) {
+            let trimmed = content.trim();
+            if trimmed == "MISSING" || trimmed.is_empty() {
+                results.insert(label.to_string(), None);
+            } else {
+                results.insert(label.to_string(), Some(parse_path_size(shell, content)));
+            }
+        }
+    }
+    results
+}
+
+/// Split output by `PREFIX<name>` markers into (name, content) pairs.
+fn split_by_marker<'a>(output: &'a str, prefix: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut current_lines: Vec<&str> = Vec::new();
+
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            // Save previous block
+            if let Some(name) = current_name.take() {
+                results.push((name, current_lines.join("\n")));
+            }
+            current_name = Some(rest.trim().to_string());
+            current_lines.clear();
+        } else if current_name.is_some() {
+            current_lines.push(line);
+        }
+    }
+    // Save last block
+    if let Some(name) = current_name {
+        results.push((name, current_lines.join("\n")));
+    }
+    results
 }
 
 // --- sh parsers ---
@@ -169,4 +235,62 @@ fn parse_ps_system_info(stdout: &str) -> Value {
 
 fn parse_ps_memory(stdout: &str) -> Value {
     Value::String(stdout.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_batch_splits_metrics() {
+        let output = "---METRIC:online\nok\n---METRIC:cpu_arch\nx86_64\n";
+        let metrics = vec!["online".into(), "cpu_arch".into()];
+        let result = parse_batch(ShellType::Sh, &metrics, output);
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key("online"));
+        assert!(result.contains_key("cpu_arch"));
+        assert_eq!(result["cpu_arch"], Value::String("x86_64".into()));
+    }
+
+    #[test]
+    fn test_parse_batch_empty_output() {
+        let result = parse_batch(ShellType::Sh, &["online".into()], "");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_batch_ignores_unknown_metrics() {
+        let output = "---METRIC:online\nok\n---METRIC:unknown_thing\nfoo\n";
+        let metrics = vec!["online".into()];
+        let result = parse_batch(ShellType::Sh, &metrics, output);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("online"));
+    }
+
+    #[test]
+    fn test_parse_batch_paths_ok() {
+        let output = "---PATH:home\n12345\t/home\n---PATH:logs\nMISSING\n";
+        let paths = vec![("~/".into(), "home".into()), ("/var".into(), "logs".into())];
+        let result = parse_batch_paths(ShellType::Sh, &paths, output);
+        assert_eq!(result.len(), 2);
+        assert_eq!(*result.get("home").unwrap(), Some(12345u64));
+        assert_eq!(*result.get("logs").unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_batch_paths_empty() {
+        let result = parse_batch_paths(ShellType::Sh, &[], "");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_split_by_marker() {
+        let output = "---METRIC:a\nline1\nline2\n---METRIC:b\nline3\n";
+        let result = split_by_marker(output, "---METRIC:");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "a");
+        assert!(result[0].1.contains("line1"));
+        assert_eq!(result[1].0, "b");
+        assert!(result[1].1.contains("line3"));
+    }
 }

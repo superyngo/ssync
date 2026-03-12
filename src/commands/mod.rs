@@ -106,12 +106,21 @@ impl Context {
         Ok(hosts)
     }
 
-    /// Get the concurrency limit.
+    /// Get the global concurrency limit.
     pub fn concurrency(&self) -> usize {
         if self.serial {
             1
         } else {
             self.config.settings.max_concurrency
+        }
+    }
+
+    /// Get the per-host concurrency limit.
+    pub fn per_host_concurrency(&self) -> usize {
+        if self.serial {
+            1
+        } else {
+            self.config.settings.max_per_host_concurrency
         }
     }
 

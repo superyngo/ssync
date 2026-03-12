@@ -22,3 +22,34 @@ pub fn command_for(metric: &str) -> String {
         _ => String::new(),
     }
 }
+
+/// Build a single PowerShell command that collects all metrics with `---METRIC:` markers.
+pub fn batch_command(metrics: &[String]) -> String {
+    if metrics.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for metric in metrics {
+        let cmd = command_for(metric);
+        if cmd.is_empty() {
+            continue;
+        }
+        parts.push(format!("\"---METRIC:{}\"; {}", metric, cmd));
+    }
+    parts.join("; ")
+}
+
+/// Build a single PowerShell command that measures all path sizes with `---PATH:` markers.
+pub fn batch_path_command(paths: &[(String, String)]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    for (path, label) in paths {
+        parts.push(format!(
+            "\"---PATH:{}\"; try {{ (Get-ChildItem -Recurse -File '{}' | Measure-Object -Property Length -Sum).Sum }} catch {{ \"MISSING\" }}",
+            label, path
+        ));
+    }
+    parts.join("; ")
+}
