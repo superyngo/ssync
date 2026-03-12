@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -634,6 +635,161 @@ fn to_tilde_path(path: &str) -> String {
     path.to_string()
 }
 
+/// Result of batch metadata collection for a single file.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct SingleFileResult {
+    found: Option<FileInfo>,
+    is_missing: bool,
+}
+
+/// Generate a single shell command that collects stat + hash for ALL files at once.
+#[allow(dead_code)]
+fn build_batch_metadata_cmd(paths: &[String], shell: ShellType) -> String {
+    match shell {
+        ShellType::PowerShell => {
+            let expanded: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    if let Some(stripped) = p.strip_prefix("~/") {
+                        format!("\"$HOME\\{}\"", stripped.replace('/', "\\"))
+                    } else {
+                        format!("\"{}\"", p)
+                    }
+                })
+                .collect();
+            format!(
+                "foreach ($f in @({files})) {{ \
+                 \"---FILE:$f\"; \
+                 $i=Get-Item $f -ErrorAction SilentlyContinue; \
+                 if ($i) {{ \
+                   [int64](($i.LastWriteTimeUtc-[datetime]\"1970-01-01\").TotalSeconds), $i.Length -join \" \"; \
+                   (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() \
+                 }} else {{ \"MISSING\" }} \
+                 }}",
+                files = expanded.join(",")
+            )
+        }
+        ShellType::Sh | ShellType::Cmd => {
+            let expanded: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    if let Some(stripped) = p.strip_prefix("~/") {
+                        format!("$HOME/'{}'", stripped.replace('\'', "'\\''"))
+                    } else {
+                        format!("'{}'", p.replace('\'', "'\\''"))
+                    }
+                })
+                .collect();
+            format!(
+                "for f in {files}; do \
+                 echo \"---FILE:$f\"; \
+                 stat -c '%Y %s' \"$f\" 2>/dev/null || stat -f '%m %z' \"$f\" 2>/dev/null || echo \"MISSING\"; \
+                 (sha256sum \"$f\" 2>/dev/null || shasum -a 256 \"$f\" 2>/dev/null) || echo \"NOHASH\"; \
+                 done",
+                files = expanded.join(" ")
+            )
+        }
+    }
+}
+
+/// Parse the output of a batch metadata command into per-file results.
+///
+/// Splits output by `---FILE:` markers, matching each block positionally
+/// to the corresponding path in `paths`.
+#[allow(dead_code)]
+fn parse_batch_metadata_output(
+    output: &str,
+    paths: &[String],
+    host_name: &str,
+) -> HashMap<String, SingleFileResult> {
+    let mut result = HashMap::new();
+
+    // Split by "---FILE:" marker; first element is before any marker (empty/junk).
+    let blocks: Vec<&str> = output.split("---FILE:").collect();
+    let file_blocks = if blocks.len() > 1 {
+        &blocks[1..]
+    } else {
+        return result;
+    };
+
+    for (i, block) in file_blocks.iter().enumerate() {
+        if i >= paths.len() {
+            break;
+        }
+        let original_path = &paths[i];
+        // Lines: first is the expanded path, rest is data
+        let lines: Vec<&str> = block.lines().collect();
+
+        if lines.len() < 2 {
+            result.insert(
+                original_path.clone(),
+                SingleFileResult {
+                    found: None,
+                    is_missing: true,
+                },
+            );
+            continue;
+        }
+
+        let data_line = lines[1].trim();
+        if data_line == "MISSING" {
+            result.insert(
+                original_path.clone(),
+                SingleFileResult {
+                    found: None,
+                    is_missing: true,
+                },
+            );
+            continue;
+        }
+
+        // Parse stat line: "mtime size"
+        let stat_parts: Vec<&str> = data_line.split_whitespace().collect();
+        let mtime: i64 = stat_parts
+            .first()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let size: u64 = stat_parts
+            .get(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        // Parse hash line (third line in block)
+        let hash = if lines.len() > 2 {
+            let hash_line = lines[2].trim();
+            if hash_line == "NOHASH" {
+                String::new()
+            } else {
+                // Format: "hash  filename" or just "hash"
+                hash_line
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            }
+        } else {
+            String::new()
+        };
+
+        result.insert(
+            original_path.clone(),
+            SingleFileResult {
+                found: Some(FileInfo {
+                    host: host_name.to_string(),
+                    path: original_path.clone(),
+                    mtime,
+                    size,
+                    hash,
+                }),
+                is_missing: false,
+            },
+        );
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +841,52 @@ mod tests {
         assert_eq!(d.target_hosts, vec!["host-b".to_string()]);
         assert_eq!(d.synced_hosts, vec!["host-c".to_string()]);
         assert!(d.reason.contains("fixed source: host-a"));
+    }
+
+    #[test]
+    fn test_build_batch_metadata_cmd_sh() {
+        let paths = vec!["~/.bashrc".to_string(), "~/.vimrc".to_string()];
+        let cmd = build_batch_metadata_cmd(&paths, ShellType::Sh);
+        assert!(cmd.contains("---FILE:"));
+        assert!(cmd.contains("stat"));
+        assert!(cmd.contains("sha256sum") || cmd.contains("shasum"));
+        assert!(cmd.contains(".bashrc"));
+        assert!(cmd.contains(".vimrc"));
+    }
+
+    #[test]
+    fn test_build_batch_metadata_cmd_powershell() {
+        let paths = vec!["~/.bashrc".to_string()];
+        let cmd = build_batch_metadata_cmd(&paths, ShellType::PowerShell);
+        assert!(cmd.contains("---FILE:"));
+        assert!(cmd.contains("Get-Item"));
+        assert!(cmd.contains("Get-FileHash"));
+    }
+
+    #[test]
+    fn test_parse_batch_metadata_output() {
+        let output = "---FILE:$HOME/.bashrc\n1700000000 1234\nabc123def456  /home/user/.bashrc\n---FILE:$HOME/.vimrc\nMISSING\n";
+        let paths = vec!["~/.bashrc".to_string(), "~/.vimrc".to_string()];
+        let result = parse_batch_metadata_output(output, &paths, "host-a");
+        assert_eq!(result.len(), 2);
+        let bashrc = &result["~/.bashrc"];
+        assert!(bashrc.found.is_some());
+        let fi = bashrc.found.as_ref().unwrap();
+        assert_eq!(fi.mtime, 1700000000);
+        assert_eq!(fi.hash, "abc123def456");
+        let vimrc = &result["~/.vimrc"];
+        assert!(vimrc.found.is_none());
+        assert!(vimrc.is_missing);
+    }
+
+    #[test]
+    fn test_parse_batch_metadata_nohash() {
+        let output = "---FILE:$HOME/.bashrc\n1700000000 1234\nNOHASH\n";
+        let paths = vec!["~/.bashrc".to_string()];
+        let result = parse_batch_metadata_output(output, &paths, "host-a");
+        let bashrc = &result["~/.bashrc"];
+        assert!(bashrc.found.is_some());
+        let fi = bashrc.found.as_ref().unwrap();
+        assert!(fi.hash.is_empty(), "NOHASH sentinel should produce empty hash");
     }
 }
