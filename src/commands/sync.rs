@@ -225,8 +225,7 @@ pub async fn run(
                 println!("  [dry-run] No changes applied.");
             }
         } else {
-            let host_names: Vec<String> =
-                reachable_hosts.iter().map(|h| h.name.clone()).collect();
+            let host_names: Vec<String> = reachable_hosts.iter().map(|h| h.name.clone()).collect();
             let limiter = ConcurrencyLimiter::new(
                 ctx.concurrency(),
                 ctx.config.settings.max_per_host_concurrency,
@@ -248,10 +247,7 @@ pub async fn run(
                     printer::print_host_line("passed", "ok", &decision.synced_hosts.join(", "));
                 }
 
-                progress.start_transfer(
-                    &decision.path,
-                    decision.target_hosts.len(),
-                );
+                progress.start_transfer(&decision.path, decision.target_hosts.len());
 
                 match distribute_pooled(
                     &reachable_hosts,
@@ -265,11 +261,7 @@ pub async fn run(
                 {
                     Ok((succeeded, failed_uploads)) => {
                         if !succeeded.is_empty() {
-                            printer::print_host_line(
-                                "synced",
-                                "ok",
-                                &succeeded.join(", "),
-                            );
+                            printer::print_host_line("synced", "ok", &succeeded.join(", "));
                             summary.add_success();
 
                             let now = chrono::Utc::now().timestamp();
@@ -299,11 +291,7 @@ pub async fn run(
                         if !failed_uploads.is_empty() {
                             let failed_names: Vec<&str> =
                                 failed_uploads.iter().map(|(n, _)| n.as_str()).collect();
-                            printer::print_host_line(
-                                "failed",
-                                "error",
-                                &failed_names.join(", "),
-                            );
+                            printer::print_host_line("failed", "error", &failed_names.join(", "));
                             for (target, err) in &failed_uploads {
                                 println!("    {}: {}", target, err);
                                 summary.add_failure(target, err);
@@ -312,10 +300,7 @@ pub async fn run(
                     }
                     Err(e) => {
                         printer::print_host_line("failed", "error", &decision.source_host);
-                        println!(
-                            "    {}: download failed: {}",
-                            decision.source_host, e
-                        );
+                        println!("    {}: download failed: {}", decision.source_host, e);
                         summary.add_failure(&decision.source_host, &e.to_string());
                     }
                 }
@@ -385,8 +370,16 @@ async fn sync_path_across(
             src,
         )?;
         if let Some((source, skipped_path)) = skip_info {
-            printer::print_host_line("skip", &source, &format!("does not have '{}'", skipped_path));
-            summary.add_skip_with_reason(&skipped_path, &source, &format!("source '{}' does not have '{}'", source, skipped_path));
+            printer::print_host_line(
+                "skip",
+                &source,
+                &format!("does not have '{}'", skipped_path),
+            );
+            summary.add_skip_with_reason(
+                &skipped_path,
+                &source,
+                &format!("source '{}' does not have '{}'", source, skipped_path),
+            );
             return Ok(());
         }
         decs
@@ -869,14 +862,8 @@ async fn distribute_pooled(
     let source_socket = conn_mgr.socket_for(&source.name);
     {
         let _permit = limiter.acquire(&source.name).await;
-        executor::download_pooled(
-            source,
-            &decision.path,
-            &local_temp,
-            timeout,
-            source_socket,
-        )
-        .await?;
+        executor::download_pooled(source, &decision.path, &local_temp, timeout, source_socket)
+            .await?;
     }
 
     // Upload to all targets in parallel with concurrency limiter
@@ -914,22 +901,13 @@ async fn distribute_pooled(
                 .unwrap_or_default();
             if !parent.is_empty() && parent != "/" && !parent.starts_with('~') {
                 let mkdir_cmd = format!("mkdir -p '{}'", parent.replace('\'', "'\\''"));
-                let _ = executor::run_remote_pooled(
-                    &target,
-                    &mkdir_cmd,
-                    timeout,
-                    socket.as_deref(),
-                )
-                .await;
+                let _ =
+                    executor::run_remote_pooled(&target, &mkdir_cmd, timeout, socket.as_deref())
+                        .await;
             } else if parent.starts_with("~/") || parent == "~" {
-                let sub = if parent == "~" {
-                    ""
-                } else {
-                    &parent[2..]
-                };
+                let sub = if parent == "~" { "" } else { &parent[2..] };
                 if !sub.is_empty() {
-                    let mkdir_cmd =
-                        format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\""));
+                    let mkdir_cmd = format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\""));
                     let _ = executor::run_remote_pooled(
                         &target,
                         &mkdir_cmd,
@@ -940,9 +918,14 @@ async fn distribute_pooled(
                 }
             }
 
-            let result =
-                executor::upload_pooled(&target, &local_temp, &remote_path, timeout, socket.as_deref())
-                    .await;
+            let result = executor::upload_pooled(
+                &target,
+                &local_temp,
+                &remote_path,
+                timeout,
+                socket.as_deref(),
+            )
+            .await;
             (target_name, result)
         }));
     }
@@ -1090,14 +1073,8 @@ fn parse_batch_metadata_output(
 
         // Parse stat line: "mtime size"
         let stat_parts: Vec<&str> = data_line.split_whitespace().collect();
-        let mtime: i64 = stat_parts
-            .first()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let size: u64 = stat_parts
-            .get(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let mtime: i64 = stat_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let size: u64 = stat_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         // Parse hash line (third line in block)
         let hash = if lines.len() > 2 {
@@ -1170,13 +1147,7 @@ async fn batch_collect_all_metadata(
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            let result = executor::run_remote_pooled(
-                &host,
-                &cmd,
-                timeout,
-                socket.as_deref(),
-            )
-            .await;
+            let result = executor::run_remote_pooled(&host, &cmd, timeout, socket.as_deref()).await;
 
             match result {
                 Ok(output) if output.success => {
@@ -1246,8 +1217,7 @@ mod tests {
             make_file_info("host-c", "~/.bashrc", "def456"),
         ];
         let missing: Vec<String> = vec![];
-        let result =
-            make_decisions_fixed_source(&infos, "~/.bashrc", false, &missing, "host-a");
+        let result = make_decisions_fixed_source(&infos, "~/.bashrc", false, &missing, "host-a");
         assert!(result.is_ok(), "should not return an error");
         let (decisions, skip_info) = result.unwrap();
         assert!(decisions.is_empty(), "decisions should be empty");
@@ -1265,11 +1235,13 @@ mod tests {
             make_file_info("host-c", "~/.bashrc", "abc123"),
         ];
         let missing: Vec<String> = vec![];
-        let result =
-            make_decisions_fixed_source(&infos, "~/.bashrc", false, &missing, "host-a");
+        let result = make_decisions_fixed_source(&infos, "~/.bashrc", false, &missing, "host-a");
         assert!(result.is_ok());
         let (decisions, skip_info) = result.unwrap();
-        assert!(skip_info.is_none(), "skip_info should be None when source is found");
+        assert!(
+            skip_info.is_none(),
+            "skip_info should be None when source is found"
+        );
         assert_eq!(decisions.len(), 1);
         let d = &decisions[0];
         assert_eq!(d.source_host, "host-a");
@@ -1322,6 +1294,9 @@ mod tests {
         let bashrc = &result["~/.bashrc"];
         assert!(bashrc.found.is_some());
         let fi = bashrc.found.as_ref().unwrap();
-        assert!(fi.hash.is_empty(), "NOHASH sentinel should produce empty hash");
+        assert!(
+            fi.hash.is_empty(),
+            "NOHASH sentinel should produce empty hash"
+        );
     }
 }

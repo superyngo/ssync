@@ -60,7 +60,12 @@ impl ConnectionManager {
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
                 let result = establish_master(&host, &socket_path, timeout_secs).await;
-                (host.name.clone(), host.ssh_host.clone(), socket_path, result)
+                (
+                    host.name.clone(),
+                    host.ssh_host.clone(),
+                    socket_path,
+                    result,
+                )
             }));
         }
 
@@ -68,12 +73,18 @@ impl ConnectionManager {
         for handle in handles {
             match handle.await {
                 Ok((name, ssh_host, socket_path, Ok(()))) => {
-                    self.hosts.insert(name.clone(), ConnectionState::Connected { socket_path });
+                    self.hosts
+                        .insert(name.clone(), ConnectionState::Connected { socket_path });
                     self.host_map.insert(name, ssh_host);
                     connected += 1;
                 }
                 Ok((name, ssh_host, _, Err(e))) => {
-                    self.hosts.insert(name.clone(), ConnectionState::Failed { error: e.to_string() });
+                    self.hosts.insert(
+                        name.clone(),
+                        ConnectionState::Failed {
+                            error: e.to_string(),
+                        },
+                    );
                     self.host_map.insert(name, ssh_host);
                 }
                 Err(e) => {
@@ -179,21 +190,22 @@ impl Drop for ConnectionManager {
 }
 
 /// Establish a ControlMaster connection to a host.
-async fn establish_master(
-    host: &HostEntry,
-    socket_path: &Path,
-    timeout_secs: u64,
-) -> Result<()> {
+async fn establish_master(host: &HostEntry, socket_path: &Path, timeout_secs: u64) -> Result<()> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         Command::new("ssh")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg(format!("ConnectTimeout={}", timeout_secs))
-            .arg("-o").arg("ControlMaster=yes")
-            .arg("-o").arg(format!("ControlPath={}", socket_path.display()))
-            .arg("-o").arg("ControlPersist=300")
-            .arg("-N")  // no remote command
-            .arg("-f")  // go to background after auth
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", timeout_secs))
+            .arg("-o")
+            .arg("ControlMaster=yes")
+            .arg("-o")
+            .arg(format!("ControlPath={}", socket_path.display()))
+            .arg("-o")
+            .arg("ControlPersist=300")
+            .arg("-N") // no remote command
+            .arg("-f") // go to background after auth
             .arg(&host.ssh_host)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -221,7 +233,12 @@ mod tests {
         let path = mgr.socket_path_for("very-long-hostname.example.com");
         // /tmp/ssync-XXXXXX/123456789012 should be well under 104 bytes
         let path_str = path.to_string_lossy();
-        assert!(path_str.len() < 104, "Socket path too long: {} ({} bytes)", path_str, path_str.len());
+        assert!(
+            path_str.len() < 104,
+            "Socket path too long: {} ({} bytes)",
+            path_str,
+            path_str.len()
+        );
     }
 
     #[test]

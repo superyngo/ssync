@@ -76,7 +76,11 @@ mod tests {
     #[test]
     fn test_skip_reason_recorded() {
         let mut s = Summary::default();
-        s.add_skip_with_reason("~/.bashrc", "host-a", "source 'host-a' does not have '~/.bashrc'");
+        s.add_skip_with_reason(
+            "~/.bashrc",
+            "host-a",
+            "source 'host-a' does not have '~/.bashrc'",
+        );
         assert_eq!(s.skipped, 1);
         assert_eq!(s.skip_reasons.len(), 1);
         assert_eq!(s.skip_reasons[0].path, "~/.bashrc");

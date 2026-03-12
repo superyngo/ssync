@@ -1,0 +1,7 @@
+"~/.zshrc",
+"~/.local/share/agm/prompts/MASTER.md",
+"~/.claude.json",
+"~/.claude/.credentials.json",
+"~/.copilot/config.json",
+"~/.gemini/oauth_creds.json",
+"~/.local/share/opencode/auth.json"

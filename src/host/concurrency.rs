@@ -31,7 +31,10 @@ impl ConcurrencyLimiter {
     /// Returns a guard that releases both permits on drop.
     pub async fn acquire(&self, host: &str) -> ConcurrencyPermit {
         let global_permit = self.global.clone().acquire_owned().await.unwrap();
-        let per_host_sem = self.per_host.get(host).expect("host not registered in limiter");
+        let per_host_sem = self
+            .per_host
+            .get(host)
+            .expect("host not registered in limiter");
         let per_host_permit = per_host_sem.clone().acquire_owned().await.unwrap();
         ConcurrencyPermit {
             _global: global_permit,
@@ -69,11 +72,7 @@ mod tests {
         let _p1 = limiter.acquire("a").await;
         let _p2 = limiter.acquire("b").await;
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(50),
-            limiter.acquire("c"),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_millis(50), limiter.acquire("c")).await;
         assert!(
             result.is_err(),
             "Third acquire should block when global limit is 2"
@@ -88,11 +87,7 @@ mod tests {
         let _p1 = limiter.acquire("a").await;
         let _p2 = limiter.acquire("a").await;
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(50),
-            limiter.acquire("a"),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_millis(50), limiter.acquire("a")).await;
         assert!(
             result.is_err(),
             "Third acquire on same host should block when per-host limit is 2"
@@ -108,11 +103,10 @@ mod tests {
             let _p = limiter.acquire("a").await;
         }
         // permit dropped — should be acquirable again
-        let result = tokio::time::timeout(
-            Duration::from_millis(50),
-            limiter.acquire("a"),
-        )
-        .await;
-        assert!(result.is_ok(), "Should acquire after previous permit dropped");
+        let result = tokio::time::timeout(Duration::from_millis(50), limiter.acquire("a")).await;
+        assert!(
+            result.is_ok(),
+            "Should acquire after previous permit dropped"
+        );
     }
 }
