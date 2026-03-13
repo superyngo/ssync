@@ -52,6 +52,7 @@ pub struct TargetArgs {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Import hosts from ~/.ssh/config and detect remote shell types
+    #[command(disable_help_flag = true)]
     Init {
         /// Re-detect shell type for existing hosts
         #[arg(long)]
@@ -64,6 +65,14 @@ pub enum Commands {
         /// Skip specific hosts (comma-separated)
         #[arg(long, value_delimiter = ',')]
         skip: Vec<String>,
+
+        /// Connection timeout in seconds (overrides config)
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// Print help
+        #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
+        help: Option<bool>,
     },
 
     /// Collect system snapshots from hosts and store in state DB
@@ -164,7 +173,12 @@ pub enum Commands {
     },
 
     /// Open config file in $EDITOR
-    Config,
+    #[command(disable_help_flag = true)]
+    Config {
+        /// Print help
+        #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
+        help: Option<bool>,
+    },
 
     /// List hosts, applicable checks, and sync paths
     #[command(disable_help_flag = true)]
@@ -174,6 +188,7 @@ pub enum Commands {
     },
 
     /// View operation logs
+    #[command(disable_help_flag = true)]
     Log {
         /// Show last N entries (default: 20)
         #[arg(long, default_value = "20")]
@@ -194,6 +209,10 @@ pub enum Commands {
         /// Show only error entries
         #[arg(long)]
         errors: bool,
+
+        /// Print help
+        #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
+        help: Option<bool>,
     },
 }
 

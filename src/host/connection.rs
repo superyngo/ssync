@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use tokio::process::Command;
 
 use crate::config::schema::HostEntry;
+use crate::host::executor;
 
 /// State of an SSH connection to a host.
 #[derive(Debug, Clone)]
@@ -22,6 +23,8 @@ pub struct ConnectionManager {
     hosts: HashMap<String, ConnectionState>,
     /// Maps host name → ssh_host for shutdown/drop (ssh -O exit needs the ssh_host, not name).
     host_map: HashMap<String, String>,
+    /// Hosts that passed SSH but failed SCP probe.
+    scp_failed: HashMap<String, String>,
 }
 
 impl ConnectionManager {
@@ -36,6 +39,7 @@ impl ConnectionManager {
             socket_dir,
             hosts: HashMap::new(),
             host_map: HashMap::new(),
+            scp_failed: HashMap::new(),
         })
     }
 
@@ -133,6 +137,68 @@ impl ConnectionManager {
                 ConnectionState::Failed { error } => Some((name.clone(), error.clone())),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// Probe SCP capability on reachable hosts in parallel.
+    /// Hosts that fail the probe are tracked internally and excluded from `scp_capable_hosts()`.
+    /// Returns the number of hosts that passed the scp probe.
+    pub async fn scp_probe(
+        &mut self,
+        hosts: &[&HostEntry],
+        timeout_secs: u64,
+        concurrency: usize,
+    ) -> usize {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let mut handles = Vec::new();
+
+        let reachable = self.reachable_hosts();
+        for host in hosts {
+            if !reachable.contains(&host.name) {
+                continue;
+            }
+            let sem = semaphore.clone();
+            let host = (*host).clone();
+            let socket = self.socket_for(&host.name).map(|p| p.to_path_buf());
+
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let result = executor::scp_probe(&host, timeout_secs, socket.as_deref()).await;
+                (host.name.clone(), result)
+            }));
+        }
+
+        let mut passed = 0;
+        for handle in handles {
+            match handle.await {
+                Ok((_name, Ok(()))) => {
+                    passed += 1;
+                }
+                Ok((name, Err(e))) => {
+                    self.scp_failed.insert(name, e.to_string());
+                }
+                Err(e) => {
+                    tracing::warn!("scp probe task panicked: {}", e);
+                }
+            }
+        }
+
+        passed
+    }
+
+    /// Return names of hosts that failed the SCP probe with error messages.
+    pub fn scp_failed_hosts(&self) -> Vec<(String, String)> {
+        self.scp_failed
+            .iter()
+            .map(|(name, err)| (name.clone(), err.clone()))
+            .collect()
+    }
+
+    /// Return names of hosts that are both SSH-reachable and SCP-capable.
+    pub fn scp_capable_hosts(&self) -> Vec<String> {
+        self.reachable_hosts()
+            .into_iter()
+            .filter(|name| !self.scp_failed.contains_key(name))
             .collect()
     }
 

@@ -6,11 +6,14 @@ use crate::cli::OutputFormat;
 use super::Context;
 
 /// Snapshot row from the database.
+#[allow(dead_code)]
 struct HostSnapshot {
     host: String,
     collected_at: i64,
     online: bool,
     data: serde_json::Value,
+    /// When the host was last confirmed online (from host_last_seen table).
+    last_online: i64,
 }
 
 /// Columns to display, derived from enabled metrics in applicable check entries.
@@ -99,6 +102,16 @@ fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<Host
             Ok((ts, online, json_str))
         });
 
+        // Query host_last_seen for the actual last_online timestamp.
+        let last_online: i64 = ctx
+            .db
+            .query_row(
+                "SELECT last_online FROM host_last_seen WHERE host = ?1",
+                params![host],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
         match entry {
             Ok((ts, online, json_str)) => {
                 let data = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
@@ -107,6 +120,7 @@ fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<Host
                     collected_at: ts,
                     online,
                     data,
+                    last_online,
                 });
             }
             Err(_) => {
@@ -115,6 +129,7 @@ fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<Host
                     collected_at: 0,
                     online: false,
                     data: serde_json::Value::Null,
+                    last_online,
                 });
             }
         }
@@ -376,7 +391,7 @@ fn print_table_report(snapshots: &[HostSnapshot], columns: &DisplayColumns) {
         } else {
             "\x1b[31m✗ offline\x1b[0m"
         };
-        let last_seen = format_relative_time(snap.collected_at);
+        let last_seen = format_relative_time(snap.last_online);
 
         // Status has ANSI codes (8 extra chars), so pad wider
         let mut line = format!("{:<16} {:<20}", snap.host, status);
@@ -562,7 +577,7 @@ fn run_tui(snapshots: &[HostSnapshot], columns: &DisplayColumns) -> Result<()> {
                 } else {
                     "✗ offline"
                 };
-                let last_seen = format_relative_time(snap.collected_at);
+                let last_seen = format_relative_time(snap.last_online);
 
                 let status_style = if snap.online {
                     Style::new().fg(Color::Green)

@@ -1,19 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use crate::config::schema::{ConflictStrategy, HostEntry, ShellType};
+use crate::config::schema::{ConflictStrategy, HostEntry, ShellType, SyncEntry};
 use crate::host::concurrency::ConcurrencyLimiter;
 use crate::host::connection::ConnectionManager;
 use crate::host::executor;
 use crate::host::pool::SshPool;
 use crate::output::printer;
-use crate::output::progress::SyncProgress;
-use crate::output::summary::Summary;
+use crate::output::summary::SyncSummary;
 
-use super::Context;
+use super::{Context, TargetMode};
+
+/// Recursive sync entry with its applicable host set and effective source override.
+type RecursiveEntry<'a> = (&'a SyncEntry, HashSet<String>, Option<&'a str>);
+
+/// Per-host applicable path sets for group-scoped sync filtering.
+type HostPathMap = HashMap<String, HashSet<String>>;
 
 /// File metadata collected from a host.
 #[derive(Debug, Clone)]
@@ -56,34 +61,23 @@ pub async fn run(
 ) -> Result<()> {
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
-    let mut summary = Summary::default();
+    let mut summary = SyncSummary::default();
 
-    // Step 1: Collect all file paths, separating recursive from non-recursive
-    let (all_paths, recursive_entries) = if !files.is_empty() {
-        let paths: Vec<String> = files.iter().map(|p| to_tilde_path(p)).collect();
-        (paths, Vec::new())
-    } else {
-        let sync_entries = ctx.resolve_syncs();
-        if sync_entries.is_empty() {
-            println!("No sync entries matched the current filter. Add [[sync]] to config.toml or use --files/-f.");
-            return Ok(());
-        }
-        let mut paths = Vec::new();
-        let mut recursive = Vec::new();
-        for entry in sync_entries {
-            let effective_source = cli_source.or(entry.source.as_deref());
-            if entry.recursive {
-                recursive.push((entry, effective_source));
-            } else {
-                for p in &entry.paths {
-                    if !paths.contains(p) {
-                        paths.push(p.clone());
-                    }
-                }
+    // Step 1: Collect all file paths, separating recursive from non-recursive.
+    // For --groups: also build per-host applicable path sets for scoping.
+    let (mut all_paths, recursive_entries, mut host_applicable_paths, mut path_source_map) =
+        if !files.is_empty() {
+            let paths: Vec<String> = files.iter().map(|p| to_tilde_path(p)).collect();
+            (paths, Vec::new(), None, HashMap::new())
+        } else {
+            let (paths, recursive, applicable, path_src) =
+                collect_sync_paths_scoped(ctx, &hosts, cli_source);
+            if paths.is_empty() && recursive.is_empty() {
+                println!("No sync entries matched the current filter. Add [[sync]] to config.toml or use --files/-f.");
+                return Ok(());
             }
-        }
-        (paths, recursive)
-    };
+            (paths, recursive, applicable, path_src)
+        };
 
     if hosts.len() < 2 && (!all_paths.is_empty() || !recursive_entries.is_empty()) {
         println!("Need at least 2 hosts for sync (found {})", hosts.len());
@@ -97,28 +91,34 @@ pub async fn run(
     };
     println!("\n── Sync: {} ──", label);
 
-    // Step 2: Pre-check SSH connections via SshPool
-    let (mut pool, _connected) = SshPool::setup(
+    // Step 2: Pre-check SSH connections via SshPool (with SCP probe)
+    let (mut pool, _connected) = SshPool::setup_with_options(
         &hosts,
         ctx.timeout,
         ctx.concurrency(),
         ctx.per_host_concurrency(),
+        true, // probe scp capability
     )
     .await?;
 
     for (name, err) in pool.failed_hosts() {
         printer::print_host_line("unreachable", "error", &format!("{}: {}", name, err));
-        summary.add_failure(&name, &err);
+        summary.add_host_failure(&name, &err);
     }
 
-    // Step 3: Filter to reachable hosts
+    for (name, err) in pool.scp_failed_hosts() {
+        printer::print_host_line("scp-failed", "error", &format!("{}: {}", name, err));
+        summary.add_host_failure(&name, &format!("scp probe failed: {}", err));
+    }
+
+    // Step 3: Filter to scp-capable hosts (excludes both unreachable and scp-failed)
     if let Some(src) = cli_source {
         if pool.socket_for(src).is_none() {
             pool.shutdown().await;
             anyhow::bail!("Source host '{}' is unreachable", src);
         }
     }
-    let reachable_hosts = pool.filter_reachable(&hosts);
+    let reachable_hosts = pool.filter_scp_capable(&hosts);
 
     if reachable_hosts.len() < 2 && !all_paths.is_empty() {
         println!(
@@ -127,6 +127,103 @@ pub async fn run(
         );
         pool.shutdown().await;
         return Ok(());
+    }
+
+    // Step 3.5: Expand directory paths for entries with a fixed source.
+    // Non-recursive paths use shallow listing (maxdepth 1).
+    {
+        // Collect paths that have a fixed source
+        let source_paths: Vec<(String, &str)> = all_paths
+            .iter()
+            .filter_map(|p| {
+                path_source_map
+                    .get(p.as_str())
+                    .and_then(|s| s.as_ref())
+                    .map(|src| (p.clone(), *src))
+            })
+            .collect();
+
+        if !source_paths.is_empty() {
+            // Group by source host
+            let mut by_source: HashMap<&str, Vec<String>> = HashMap::new();
+            for (path, src) in &source_paths {
+                by_source.entry(src).or_default().push(path.clone());
+            }
+
+            let mut dirs_expanded: HashMap<String, Vec<String>> = HashMap::new();
+            let mut dirs_missing: Vec<String> = Vec::new();
+
+            for (src_name, paths_for_src) in &by_source {
+                if let Some(source_host) = reachable_hosts.iter().find(|h| h.name == *src_name) {
+                    match expand_directory_paths(
+                        source_host,
+                        paths_for_src,
+                        false, // shallow for non-recursive entries
+                        ctx.timeout,
+                        &pool.conn_mgr,
+                    )
+                    .await
+                    {
+                        Ok(expansions) => {
+                            for (path, result) in expansions {
+                                match result {
+                                    DirExpandResult::Directory(files) => {
+                                        dirs_expanded.insert(path, files);
+                                    }
+                                    DirExpandResult::Missing => {
+                                        dirs_missing.push(path);
+                                    }
+                                    DirExpandResult::File => {} // keep as-is
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                source = %src_name,
+                                error = %e,
+                                "Failed to expand directories from source"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Replace directory paths with expanded file paths
+            if !dirs_expanded.is_empty() || !dirs_missing.is_empty() {
+                let mut new_paths = Vec::new();
+                for path in &all_paths {
+                    if let Some(expanded_files) = dirs_expanded.get(path) {
+                        let src = path_source_map.get(path.as_str()).copied().flatten();
+                        // Add each expanded file to the path source map
+                        for file_path in expanded_files {
+                            if !new_paths.contains(file_path) {
+                                new_paths.push(file_path.clone());
+                                path_source_map.entry(file_path.clone()).or_insert(src);
+                            }
+                        }
+                        // Update host_applicable_paths: replace dir with expanded files
+                        if let Some(ref mut host_map) = host_applicable_paths {
+                            for (_host, path_set) in host_map.iter_mut() {
+                                if path_set.remove(path) {
+                                    for file_path in expanded_files {
+                                        path_set.insert(file_path.clone());
+                                    }
+                                }
+                            }
+                        }
+                        if expanded_files.is_empty() {
+                            println!("  {} (empty directory on source, skipping)", path);
+                        }
+                    } else if dirs_missing.contains(path) {
+                        // Skip missing paths — already handled by normal flow
+                        new_paths.push(path.clone());
+                    } else {
+                        new_paths.push(path.clone());
+                    }
+                }
+                all_paths = new_paths;
+            }
+        }
     }
 
     // Step 4: Batch collect metadata for non-recursive files
@@ -146,8 +243,12 @@ pub async fn run(
         let mut all_decisions: Vec<SyncDecision> = Vec::new();
         for path in &all_paths {
             if let Some(collect) = batch_result.per_file.get(path) {
-                if collect.found.is_empty() {
-                    if !collect.missing.is_empty() {
+                // For --groups mode: filter to only hosts whose applicable path set includes this path
+                let (scoped_found, scoped_missing) =
+                    scope_collect_result(collect, path, &host_applicable_paths);
+
+                if scoped_found.is_empty() {
+                    if !scoped_missing.is_empty() {
                         println!("  {}: file not found on any reachable host", path);
                     } else {
                         println!("  {}: no data collected", path);
@@ -155,12 +256,14 @@ pub async fn run(
                     continue;
                 }
 
-                let decisions = if let Some(src) = cli_source {
+                let effective_source =
+                    cli_source.or_else(|| path_source_map.get(path.as_str()).copied().flatten());
+                let decisions = if let Some(src) = effective_source {
                     let (decs, skip_info) = make_decisions_fixed_source(
-                        &collect.found,
+                        &scoped_found,
                         path,
                         push_missing,
-                        &collect.missing,
+                        &scoped_missing,
                         src,
                     )?;
                     if let Some((source, skipped_path)) = skip_info {
@@ -179,20 +282,20 @@ pub async fn run(
                     decs
                 } else {
                     make_decisions(
-                        &collect.found,
+                        &scoped_found,
                         &ctx.config.settings.conflict_strategy,
                         path,
                         push_missing,
-                        &collect.missing,
+                        &scoped_missing,
                     )
                 };
 
                 if decisions.is_empty() {
                     let hosts_list: Vec<&str> =
-                        collect.found.iter().map(|f| f.host.as_str()).collect();
+                        scoped_found.iter().map(|f| f.host.as_str()).collect();
                     println!("  {} (all in sync)", path);
                     printer::print_host_line("passed", "ok", &hosts_list.join(", "));
-                    summary.add_success();
+                    summary.file_in_sync(&hosts_list);
                 } else {
                     all_decisions.extend(decisions);
                 }
@@ -235,23 +338,18 @@ pub async fn run(
                     printer::print_host_line("passed", "ok", &decision.synced_hosts.join(", "));
                 }
 
-                pool.progress
-                    .start_transfer(&decision.path, decision.target_hosts.len());
-
                 match distribute_pooled(
                     &reachable_hosts,
                     decision,
                     ctx.timeout,
                     &pool.limiter,
                     &pool.conn_mgr,
-                    &pool.progress,
                 )
                 .await
                 {
                     Ok((succeeded, failed_uploads)) => {
                         if !succeeded.is_empty() {
                             printer::print_host_line("synced", "ok", &succeeded.join(", "));
-                            summary.add_success();
 
                             let now = chrono::Utc::now().timestamp();
                             for target in &succeeded {
@@ -281,30 +379,105 @@ pub async fn run(
                             let failed_names: Vec<&str> =
                                 failed_uploads.iter().map(|(n, _)| n.as_str()).collect();
                             printer::print_host_line("failed", "error", &failed_names.join(", "));
-                            for (target, err) in &failed_uploads {
-                                println!("    {}: {}", target, err);
-                                summary.add_failure(target, err);
-                            }
                         }
+
+                        summary.complete_file(
+                            &decision.path,
+                            &decision.synced_hosts,
+                            &succeeded,
+                            &failed_uploads,
+                        );
                     }
                     Err(e) => {
                         printer::print_host_line("failed", "error", &decision.source_host);
-                        println!("    {}: download failed: {}", decision.source_host, e);
-                        summary.add_failure(&decision.source_host, &e.to_string());
+                        // Source download failed — all targets implicitly fail
+                        let all_failed: Vec<(String, String)> =
+                            std::iter::once((decision.source_host.clone(), e.to_string()))
+                                .chain(
+                                    decision.target_hosts.iter().map(|t| {
+                                        (t.clone(), format!("source download failed: {}", e))
+                                    }),
+                                )
+                                .collect();
+                        summary.complete_file(
+                            &decision.path,
+                            &decision.synced_hosts,
+                            &[],
+                            &all_failed,
+                        );
                     }
                 }
-
-                pool.progress.finish_transfer(&decision.path);
             }
         }
     }
 
-    // Handle recursive entries with existing per-file flow (unchanged)
-    for (entry, effective_source) in &recursive_entries {
-        for path in &entry.paths {
+    // Handle recursive entries with per-file flow.
+    // For --groups: scope hosts per recursive entry based on group membership.
+    // For entries with a fixed source: expand directory paths (deep recursive) before syncing.
+    for (entry, hosts_for_entry, effective_source) in &recursive_entries {
+        let scoped_hosts: Vec<&HostEntry> = reachable_hosts
+            .iter()
+            .filter(|h| hosts_for_entry.contains(&h.name))
+            .copied()
+            .collect();
+        if scoped_hosts.len() < 2 {
+            continue;
+        }
+
+        // Expand directory paths from source when a fixed source is set
+        let expanded_paths: Vec<String> = if let Some(src_name) = effective_source {
+            if let Some(source_host) = scoped_hosts.iter().find(|h| h.name == *src_name) {
+                match expand_directory_paths(
+                    source_host,
+                    &entry.paths,
+                    true, // deep recursive for recursive entries
+                    ctx.timeout,
+                    &pool.conn_mgr,
+                )
+                .await
+                {
+                    Ok(expansions) => {
+                        let mut paths = Vec::new();
+                        for p in &entry.paths {
+                            match expansions.get(p) {
+                                Some(DirExpandResult::Directory(files)) => {
+                                    if files.is_empty() {
+                                        println!("  {} (empty directory on source, skipping)", p);
+                                    } else {
+                                        paths.extend(files.iter().cloned());
+                                    }
+                                }
+                                Some(DirExpandResult::File) | None => {
+                                    paths.push(p.clone());
+                                }
+                                Some(DirExpandResult::Missing) => {
+                                    // Will be handled by sync_path_across as missing on source
+                                    paths.push(p.clone());
+                                }
+                            }
+                        }
+                        paths
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            source = %src_name,
+                            error = %e,
+                            "Failed to expand directories from source, falling back to original paths"
+                        );
+                        entry.paths.clone()
+                    }
+                }
+            } else {
+                entry.paths.clone()
+            }
+        } else {
+            entry.paths.clone()
+        };
+
+        for path in &expanded_paths {
             sync_path_across(
                 ctx,
-                &reachable_hosts,
+                &scoped_hosts,
                 path,
                 &label,
                 dry_run,
@@ -323,6 +496,125 @@ pub async fn run(
     Ok(())
 }
 
+/// Collect sync paths with per-host scoping for --groups mode.
+/// Returns: (all_paths for batch collection, recursive entries with host sets, optional per-host path map).
+/// Per-path source override map: path → source host name.
+type PathSourceMap<'a> = HashMap<String, Option<&'a str>>;
+
+fn collect_sync_paths_scoped<'a>(
+    ctx: &'a Context,
+    hosts: &[&HostEntry],
+    cli_source: Option<&'a str>,
+) -> (
+    Vec<String>,
+    Vec<RecursiveEntry<'a>>,
+    Option<HostPathMap>,
+    PathSourceMap<'a>,
+) {
+    match &ctx.mode {
+        TargetMode::Groups(groups) => {
+            let mut all_paths_set: Vec<String> = Vec::new();
+            let mut host_paths: HashMap<String, HashSet<String>> = HashMap::new();
+            let mut recursive: Vec<(&SyncEntry, HashSet<String>, Option<&str>)> = Vec::new();
+            let mut seen_recursive: HashSet<usize> = HashSet::new();
+            let mut path_sources: PathSourceMap<'a> = HashMap::new();
+
+            for host in hosts {
+                let mut seen_entries = HashSet::new();
+                for group in &host.groups {
+                    if !groups.contains(group) {
+                        continue;
+                    }
+                    for entry in ctx.resolve_syncs_for_group(group) {
+                        let ptr = std::ptr::from_ref(entry) as usize;
+                        if !seen_entries.insert(ptr) {
+                            continue;
+                        }
+                        let effective_source = cli_source.or(entry.source.as_deref());
+                        if entry.recursive {
+                            // Track which hosts apply to this recursive entry
+                            if let Some(existing) = recursive
+                                .iter_mut()
+                                .find(|(e, _, _)| std::ptr::from_ref(*e) as usize == ptr)
+                            {
+                                existing.1.insert(host.name.clone());
+                            } else if seen_recursive.insert(ptr) {
+                                let mut host_set = HashSet::new();
+                                host_set.insert(host.name.clone());
+                                recursive.push((entry, host_set, effective_source));
+                            }
+                        } else {
+                            for p in &entry.paths {
+                                host_paths
+                                    .entry(host.name.clone())
+                                    .or_default()
+                                    .insert(p.clone());
+                                if !all_paths_set.contains(p) {
+                                    all_paths_set.push(p.clone());
+                                }
+                                path_sources.entry(p.clone()).or_insert(effective_source);
+                            }
+                        }
+                    }
+                }
+            }
+
+            (all_paths_set, recursive, Some(host_paths), path_sources)
+        }
+        _ => {
+            // Flat merge for --hosts and --all
+            let sync_entries = ctx.resolve_syncs();
+            let mut paths = Vec::new();
+            let mut recursive = Vec::new();
+            let mut path_sources: PathSourceMap<'a> = HashMap::new();
+            for entry in sync_entries {
+                let effective_source = cli_source.or(entry.source.as_deref());
+                if entry.recursive {
+                    // For flat merge, all hosts are applicable
+                    let all_host_names: HashSet<String> =
+                        hosts.iter().map(|h| h.name.clone()).collect();
+                    recursive.push((entry, all_host_names, effective_source));
+                } else {
+                    for p in &entry.paths {
+                        if !paths.contains(p) {
+                            paths.push(p.clone());
+                        }
+                        path_sources.entry(p.clone()).or_insert(effective_source);
+                    }
+                }
+            }
+            (paths, recursive, None, path_sources)
+        }
+    }
+}
+
+/// Filter collect results to only include hosts whose applicable path set includes the path.
+/// When host_applicable_paths is None (flat merge mode), returns unfiltered data.
+fn scope_collect_result(
+    collect: &CollectResult,
+    path: &str,
+    host_applicable_paths: &Option<HostPathMap>,
+) -> (Vec<FileInfo>, Vec<String>) {
+    match host_applicable_paths {
+        Some(map) => {
+            let found: Vec<FileInfo> = collect
+                .found
+                .iter()
+                .filter(|fi| map.get(&fi.host).is_some_and(|paths| paths.contains(path)))
+                .cloned()
+                .collect();
+            let missing: Vec<String> = collect
+                .missing
+                .iter()
+                .filter(|host| map.get(*host).is_some_and(|paths| paths.contains(path)))
+                .cloned()
+                .collect();
+            (found, missing)
+        }
+        None => (collect.found.clone(), collect.missing.clone()),
+    }
+}
+
 /// Sync a single path across a set of hosts.
 #[allow(clippy::too_many_arguments)]
 async fn sync_path_across(
@@ -333,7 +625,7 @@ async fn sync_path_across(
     dry_run: bool,
     push_missing: bool,
     source_override: Option<&str>,
-    summary: &mut Summary,
+    summary: &mut SyncSummary,
 ) -> Result<()> {
     // Stage 1: Collect metadata from all hosts
     let collect_result = collect_file_metadata(hosts, path, ctx.timeout, ctx.concurrency()).await?;
@@ -389,7 +681,7 @@ async fn sync_path_across(
             .collect();
         println!("  {} (all in sync)", path);
         printer::print_host_line("passed", "ok", &hosts_list.join(", "));
-        summary.add_success();
+        summary.file_in_sync(&hosts_list);
         return Ok(());
     }
 
@@ -419,7 +711,6 @@ async fn sync_path_across(
             Ok((succeeded, failed_uploads)) => {
                 if !succeeded.is_empty() {
                     printer::print_host_line("synced", "ok", &succeeded.join(", "));
-                    summary.add_success();
 
                     // Update sync_state in DB
                     let now = chrono::Utc::now().timestamp();
@@ -447,17 +738,28 @@ async fn sync_path_across(
                     let failed_names: Vec<&str> =
                         failed_uploads.iter().map(|(n, _)| n.as_str()).collect();
                     printer::print_host_line("failed", "error", &failed_names.join(", "));
-                    for (target, err) in &failed_uploads {
-                        println!("    {}: {}", target, err);
-                        summary.add_failure(target, err);
-                    }
                 }
+
+                summary.complete_file(
+                    &decision.path,
+                    &decision.synced_hosts,
+                    &succeeded,
+                    &failed_uploads,
+                );
             }
             Err(e) => {
                 // Download from source failed — all targets implicitly fail
                 printer::print_host_line("failed", "error", &decision.source_host);
-                println!("    {}: download failed: {}", decision.source_host, e);
-                summary.add_failure(&decision.source_host, &e.to_string());
+                let all_failed: Vec<(String, String)> =
+                    std::iter::once((decision.source_host.clone(), e.to_string()))
+                        .chain(
+                            decision
+                                .target_hosts
+                                .iter()
+                                .map(|t| (t.clone(), format!("source download failed: {}", e))),
+                        )
+                        .collect();
+                summary.complete_file(&decision.path, &decision.synced_hosts, &[], &all_failed);
             }
         }
     }
@@ -837,7 +1139,6 @@ async fn distribute_pooled(
     timeout: u64,
     limiter: &ConcurrencyLimiter,
     conn_mgr: &ConnectionManager,
-    progress: &SyncProgress,
 ) -> Result<(Vec<String>, Vec<(String, String)>)> {
     let source = hosts
         .iter()
@@ -925,7 +1226,6 @@ async fn distribute_pooled(
         match result {
             Ok(()) => {
                 succeeded.push(target_name.clone());
-                progress.target_transferred(&decision.path);
             }
             Err(e) => failed.push((target_name, e.to_string())),
         }
@@ -948,6 +1248,175 @@ fn to_tilde_path(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+/// Result of directory expansion for a single path.
+#[derive(Debug, Clone, PartialEq)]
+enum DirExpandResult {
+    /// Path is a regular file — pass through unchanged.
+    File,
+    /// Path is a directory — contains the expanded list of file paths within it.
+    Directory(Vec<String>),
+    /// Path does not exist on the source host.
+    Missing,
+}
+
+/// Build a remote shell command that detects whether each path is a directory or file,
+/// and lists directory contents when applicable.
+///
+/// Output format per path:
+/// ```text
+/// ---PATH:<original_path>
+/// DIR
+/// <file1>
+/// <file2>
+/// ```
+/// or `FILE` / `MISSING` instead of `DIR`.
+fn build_dir_expand_cmd(paths: &[String], recursive: bool, shell: ShellType) -> String {
+    match shell {
+        ShellType::PowerShell => {
+            let expanded: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    if let Some(stripped) = p.strip_prefix("~/") {
+                        format!("\"$HOME\\{}\"", stripped.replace('/', "\\"))
+                    } else {
+                        format!("\"{}\"", p)
+                    }
+                })
+                .collect();
+            let recurse_flag = if recursive { " -Recurse" } else { "" };
+            // For each path: detect type, list files if directory
+            // Normalize paths back to ~/... by replacing $HOME with ~
+            format!(
+                "$h=$HOME; \
+                 foreach ($p in @({files})) {{ \
+                   $orig=$p -replace [regex]::Escape($h),'~'; \
+                   \"---PATH:$orig\"; \
+                   if (Test-Path $p -PathType Container) {{ \
+                     \"DIR\"; \
+                     Get-ChildItem $p -File{recurse} | ForEach-Object {{ \
+                       $_.FullName -replace [regex]::Escape($h),'~' \
+                     }} \
+                   }} elseif (Test-Path $p) {{ \"FILE\" }} \
+                   else {{ \"MISSING\" }} \
+                 }}",
+                files = expanded.join(","),
+                recurse = recurse_flag
+            )
+        }
+        ShellType::Sh | ShellType::Cmd => {
+            let expanded: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    if let Some(stripped) = p.strip_prefix("~/") {
+                        format!("$HOME/'{}'", stripped.replace('\'', "'\\''"))
+                    } else {
+                        format!("'{}'", p.replace('\'', "'\\''"))
+                    }
+                })
+                .collect();
+            let depth_flag = if recursive { "" } else { " -maxdepth 1" };
+            // Detect type, list files, normalize $HOME → ~
+            format!(
+                "for p in {files}; do \
+                   orig=$(echo \"$p\" | sed \"s|^$HOME/|~/|;s|^$HOME$|~|\"); \
+                   echo \"---PATH:$orig\"; \
+                   if [ -d \"$p\" ]; then \
+                     echo \"DIR\"; \
+                     find \"$p\"{depth} -type f 2>/dev/null | sed \"s|^$HOME/|~/|\" | sort; \
+                   elif [ -e \"$p\" ]; then \
+                     echo \"FILE\"; \
+                   else \
+                     echo \"MISSING\"; \
+                   fi; \
+                 done",
+                files = expanded.join(" "),
+                depth = depth_flag
+            )
+        }
+    }
+}
+
+/// Parse the output of `build_dir_expand_cmd` into per-path results.
+fn parse_dir_expand_output(output: &str, paths: &[String]) -> HashMap<String, DirExpandResult> {
+    let mut result = HashMap::new();
+
+    let blocks: Vec<&str> = output.split("---PATH:").collect();
+    let file_blocks = if blocks.len() > 1 {
+        &blocks[1..]
+    } else {
+        return result;
+    };
+
+    for (i, block) in file_blocks.iter().enumerate() {
+        if i >= paths.len() {
+            break;
+        }
+        let original_path = &paths[i];
+        let lines: Vec<&str> = block.lines().collect();
+
+        // First line is the path echo, second line is the type marker
+        if lines.len() < 2 {
+            result.insert(original_path.clone(), DirExpandResult::Missing);
+            continue;
+        }
+
+        let type_marker = lines[1].trim();
+        match type_marker {
+            "DIR" => {
+                let files: Vec<String> = lines[2..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect();
+                result.insert(original_path.clone(), DirExpandResult::Directory(files));
+            }
+            "FILE" => {
+                result.insert(original_path.clone(), DirExpandResult::File);
+            }
+            _ => {
+                result.insert(original_path.clone(), DirExpandResult::Missing);
+            }
+        }
+    }
+
+    result
+}
+
+/// SSH to source host, detect directories, and list their contents.
+/// Returns a mapping from each original path to its expansion result.
+async fn expand_directory_paths(
+    source_host: &HostEntry,
+    paths: &[String],
+    recursive: bool,
+    timeout: u64,
+    conn_mgr: &ConnectionManager,
+) -> Result<HashMap<String, DirExpandResult>> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let cmd = build_dir_expand_cmd(paths, recursive, source_host.shell);
+    let socket = conn_mgr.socket_for(&source_host.name);
+    let output = executor::run_remote_pooled(source_host, &cmd, timeout, socket).await?;
+
+    if !output.success {
+        tracing::warn!(
+            host = %source_host.name,
+            stderr = %output.stderr,
+            "Directory expansion command failed"
+        );
+        // Treat all as missing if command fails
+        let mut result = HashMap::new();
+        for p in paths {
+            result.insert(p.clone(), DirExpandResult::Missing);
+        }
+        return Ok(result);
+    }
+
+    Ok(parse_dir_expand_output(&output.stdout, paths))
 }
 
 /// Result of batch metadata collection for a single file.
@@ -1283,5 +1752,100 @@ mod tests {
             fi.hash.is_empty(),
             "NOHASH sentinel should produce empty hash"
         );
+    }
+
+    #[test]
+    fn test_build_dir_expand_cmd_sh_shallow() {
+        let paths = vec!["~/mydir".to_string(), "~/single.conf".to_string()];
+        let cmd = build_dir_expand_cmd(&paths, false, ShellType::Sh);
+        assert!(cmd.contains("---PATH:"));
+        assert!(cmd.contains("[ -d"));
+        assert!(cmd.contains("-maxdepth 1"));
+        assert!(cmd.contains("find"));
+        assert!(cmd.contains("mydir"));
+        assert!(cmd.contains("single.conf"));
+    }
+
+    #[test]
+    fn test_build_dir_expand_cmd_sh_recursive() {
+        let paths = vec!["~/mydir".to_string()];
+        let cmd = build_dir_expand_cmd(&paths, true, ShellType::Sh);
+        assert!(cmd.contains("---PATH:"));
+        assert!(cmd.contains("find"));
+        assert!(
+            !cmd.contains("-maxdepth"),
+            "recursive should not have maxdepth"
+        );
+    }
+
+    #[test]
+    fn test_build_dir_expand_cmd_powershell() {
+        let paths = vec!["~/mydir".to_string()];
+        let cmd = build_dir_expand_cmd(&paths, false, ShellType::PowerShell);
+        assert!(cmd.contains("---PATH:"));
+        assert!(cmd.contains("Test-Path"));
+        assert!(cmd.contains("Get-ChildItem"));
+        assert!(
+            !cmd.contains("-Recurse"),
+            "shallow should not have -Recurse"
+        );
+
+        let cmd_recursive = build_dir_expand_cmd(&paths, true, ShellType::PowerShell);
+        assert!(cmd_recursive.contains("-Recurse"));
+    }
+
+    #[test]
+    fn test_parse_dir_expand_output_mixed() {
+        let output = "---PATH:~/mydir\nDIR\n~/mydir/file1.txt\n~/mydir/file2.txt\n---PATH:~/single.conf\nFILE\n---PATH:~/gone\nMISSING\n";
+        let paths = vec![
+            "~/mydir".to_string(),
+            "~/single.conf".to_string(),
+            "~/gone".to_string(),
+        ];
+        let result = parse_dir_expand_output(output, &paths);
+        assert_eq!(result.len(), 3);
+
+        match &result["~/mydir"] {
+            DirExpandResult::Directory(files) => {
+                assert_eq!(files.len(), 2);
+                assert_eq!(files[0], "~/mydir/file1.txt");
+                assert_eq!(files[1], "~/mydir/file2.txt");
+            }
+            other => panic!("Expected Directory, got {:?}", other),
+        }
+
+        assert_eq!(result["~/single.conf"], DirExpandResult::File);
+        assert_eq!(result["~/gone"], DirExpandResult::Missing);
+    }
+
+    #[test]
+    fn test_parse_dir_expand_output_empty_dir() {
+        let output = "---PATH:~/emptydir\nDIR\n";
+        let paths = vec!["~/emptydir".to_string()];
+        let result = parse_dir_expand_output(output, &paths);
+
+        match &result["~/emptydir"] {
+            DirExpandResult::Directory(files) => {
+                assert!(files.is_empty(), "empty directory should have no files");
+            }
+            other => panic!("Expected Directory, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dir_expand_output_nested() {
+        let output = "---PATH:~/project\nDIR\n~/project/src/main.rs\n~/project/src/lib.rs\n~/project/Cargo.toml\n";
+        let paths = vec!["~/project".to_string()];
+        let result = parse_dir_expand_output(output, &paths);
+
+        match &result["~/project"] {
+            DirExpandResult::Directory(files) => {
+                assert_eq!(files.len(), 3);
+                assert!(files.contains(&"~/project/src/main.rs".to_string()));
+                assert!(files.contains(&"~/project/src/lib.rs".to_string()));
+                assert!(files.contains(&"~/project/Cargo.toml".to_string()));
+            }
+            other => panic!("Expected Directory, got {:?}", other),
+        }
     }
 }

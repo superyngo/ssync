@@ -77,6 +77,9 @@ fn default_concurrency() -> usize {
 fn default_per_host_concurrency() -> usize {
     4
 }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -121,13 +124,17 @@ pub struct CheckEntry {
     #[serde(default)]
     pub path: Vec<CheckPath>,
 
-    /// Groups this check applies to. Empty = global (applies with --all).
+    /// Groups this check applies to. Empty = unscoped.
     #[serde(default)]
     pub groups: Vec<String>,
 
-    /// Hosts this check applies to. Empty = not host-scoped.
-    #[serde(default)]
-    pub hosts: Vec<String>,
+    /// Whether this entry applies when using --hosts.
+    #[serde(default = "default_true")]
+    pub enable_hosts: bool,
+
+    /// Whether this entry applies when using --all.
+    #[serde(default = "default_true")]
+    pub enable_all: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,12 +146,15 @@ pub struct CheckPath {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncEntry {
     pub paths: Vec<String>,
-    /// Groups this sync applies to. Empty = global (applies with --all).
+    /// Groups this sync applies to. Empty = unscoped.
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Hosts this sync applies to. Empty = not host-scoped.
-    #[serde(default)]
-    pub hosts: Vec<String>,
+    /// Whether this entry applies when using --hosts.
+    #[serde(default = "default_true")]
+    pub enable_hosts: bool,
+    /// Whether this entry applies when using --all.
+    #[serde(default = "default_true")]
+    pub enable_all: bool,
     #[serde(default)]
     pub recursive: bool,
     pub mode: Option<String>,

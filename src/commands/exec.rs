@@ -156,16 +156,30 @@ async fn exec_on_host_pooled(
         .and_then(|n| n.to_str())
         .unwrap_or("ssync_script");
 
-    let remote_path = format!("{}/ssync_{}_{}", temp_dir, std::process::id(), script_name);
+    let suffix = format!("ssync_{}_{}", std::process::id(), script_name);
+
+    // Upload — for Sh shells, try /tmp first then fall back to ~/ (like scp_probe)
+    let remote_path = if host.shell == ShellType::Sh {
+        let primary = format!("{}/{}", temp_dir, suffix);
+        match executor::upload_pooled(host, script_path, &primary, timeout, socket).await {
+            Ok(()) => primary,
+            Err(_) => {
+                let fallback = format!("~/{}", suffix);
+                executor::upload_pooled(host, script_path, &fallback, timeout, socket).await?;
+                fallback
+            }
+        }
+    } else {
+        let path = format!("{}/{}", temp_dir, suffix);
+        executor::upload_pooled(host, script_path, &path, timeout, socket).await?;
+        path
+    };
 
     let remote_path_quoted = if host.shell == ShellType::PowerShell {
         format!("'{}'", remote_path)
     } else {
         remote_path.clone()
     };
-
-    // Upload
-    executor::upload_pooled(host, script_path, &remote_path, timeout, socket).await?;
 
     // Make executable (sh only)
     if host.shell == ShellType::Sh {

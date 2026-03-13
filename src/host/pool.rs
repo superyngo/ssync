@@ -34,6 +34,26 @@ impl SshPool {
         global_concurrency: usize,
         per_host_concurrency: usize,
     ) -> Result<(Self, usize)> {
+        Self::setup_with_options(
+            hosts,
+            timeout,
+            global_concurrency,
+            per_host_concurrency,
+            false,
+        )
+        .await
+    }
+
+    /// Set up the pool with optional SCP probe.
+    /// When `probe_scp` is true, reachable hosts are also tested for SCP capability.
+    /// The progress bar reflects both SSH + SCP checks.
+    pub async fn setup_with_options(
+        hosts: &[&HostEntry],
+        timeout: u64,
+        global_concurrency: usize,
+        per_host_concurrency: usize,
+        probe_scp: bool,
+    ) -> Result<(Self, usize)> {
         let host_names: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
         let limiter =
             ConcurrencyLimiter::new(global_concurrency, per_host_concurrency, &host_names);
@@ -42,8 +62,15 @@ impl SshPool {
 
         progress.start_host_check(hosts.len());
         let connected = conn_mgr.pre_check(hosts, timeout, global_concurrency).await;
-        let failed = hosts.len() - connected;
-        progress.finish_host_check(connected, failed);
+
+        if probe_scp && connected > 0 {
+            let _scp_passed = conn_mgr.scp_probe(hosts, timeout, global_concurrency).await;
+            let effective_ok = connected - conn_mgr.scp_failed_hosts().len();
+            progress.finish_host_check(effective_ok, hosts.len() - effective_ok);
+        } else {
+            let failed = hosts.len() - connected;
+            progress.finish_host_check(connected, failed);
+        }
 
         Ok((
             Self {
@@ -71,12 +98,27 @@ impl SshPool {
         self.conn_mgr.failed_hosts()
     }
 
+    /// Get names and errors of hosts that failed the SCP probe.
+    pub fn scp_failed_hosts(&self) -> Vec<(String, String)> {
+        self.conn_mgr.scp_failed_hosts()
+    }
+
     /// Filter a host list to only reachable hosts.
     pub fn filter_reachable<'a>(&self, hosts: &[&'a HostEntry]) -> Vec<&'a HostEntry> {
         let reachable = self.conn_mgr.reachable_hosts();
         hosts
             .iter()
             .filter(|h| reachable.contains(&h.name))
+            .copied()
+            .collect()
+    }
+
+    /// Filter a host list to only hosts that are both SSH-reachable and SCP-capable.
+    pub fn filter_scp_capable<'a>(&self, hosts: &[&'a HostEntry]) -> Vec<&'a HostEntry> {
+        let capable = self.conn_mgr.scp_capable_hosts();
+        hosts
+            .iter()
+            .filter(|h| capable.contains(&h.name))
             .copied()
             .collect()
     }

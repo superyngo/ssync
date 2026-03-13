@@ -33,11 +33,13 @@ async fn main() -> Result<()> {
             update,
             dry_run,
             skip,
+            timeout,
+            ..
         } => {
-            let ctx = commands::Context::new_without_targets(cli.verbose, cfg).await?;
+            let ctx = commands::Context::new_without_targets(cli.verbose, cfg, timeout).await?;
             commands::init::run(&ctx, update, dry_run, skip).await
         }
-        Commands::Config => commands::config::run(cfg).await,
+        Commands::Config { .. } => commands::config::run(cfg).await,
         Commands::List { target } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
             commands::list::run(&ctx).await
@@ -92,8 +94,9 @@ async fn main() -> Result<()> {
             host,
             action,
             errors,
+            ..
         } => {
-            let ctx = commands::Context::new_without_targets(cli.verbose, cfg).await?;
+            let ctx = commands::Context::new_without_targets(cli.verbose, cfg, None).await?;
             commands::log::run(&ctx, last, since, host, action, errors).await
         }
     }

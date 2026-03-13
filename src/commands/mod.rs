@@ -62,10 +62,14 @@ impl Context {
     }
 
     /// Create a context without target args (for commands like init, config, log).
-    pub async fn new_without_targets(verbose: bool, config_path: Option<&Path>) -> Result<Self> {
+    pub async fn new_without_targets(
+        verbose: bool,
+        config_path: Option<&Path>,
+        timeout_override: Option<u64>,
+    ) -> Result<Self> {
         let config = crate::config::app::load(config_path)?.unwrap_or_default();
         let db = crate::state::db::open(config.settings.state_dir.as_deref())?;
-        let timeout = config.settings.default_timeout;
+        let timeout = timeout_override.unwrap_or(config.settings.default_timeout);
 
         Ok(Self {
             config,
@@ -125,39 +129,65 @@ impl Context {
     }
 
     /// Resolve check entries based on target mode.
-    /// --groups: entries whose groups intersect. --hosts: entries whose hosts intersect.
-    /// --all: entries where both groups and hosts are empty (global entries).
+    /// --groups: entries whose groups intersect. --hosts: entries with enable_hosts.
+    /// --all: entries with enable_all.
     pub fn resolve_checks(&self) -> Vec<&CheckEntry> {
-        filter_entries_by_mode(&self.config.check, |e| &e.groups, |e| &e.hosts, &self.mode)
+        filter_entries_by_mode(
+            &self.config.check,
+            |e| &e.groups,
+            |e| e.enable_hosts,
+            |e| e.enable_all,
+            &self.mode,
+        )
     }
 
     /// Resolve sync entries based on target mode.
-    /// Same filtering logic as resolve_checks().
     pub fn resolve_syncs(&self) -> Vec<&SyncEntry> {
-        filter_entries_by_mode(&self.config.sync, |e| &e.groups, |e| &e.hosts, &self.mode)
+        filter_entries_by_mode(
+            &self.config.sync,
+            |e| &e.groups,
+            |e| e.enable_hosts,
+            |e| e.enable_all,
+            &self.mode,
+        )
+    }
+
+    /// Resolve check entries for a single group (used in per-group execution).
+    pub fn resolve_checks_for_group(&self, group: &str) -> Vec<&CheckEntry> {
+        self.config
+            .check
+            .iter()
+            .filter(|e| e.groups.iter().any(|g| g == group))
+            .collect()
+    }
+
+    /// Resolve sync entries for a single group (used in per-group execution).
+    pub fn resolve_syncs_for_group(&self, group: &str) -> Vec<&SyncEntry> {
+        self.config
+            .sync
+            .iter()
+            .filter(|e| e.groups.iter().any(|g| g == group))
+            .collect()
     }
 }
 
 /// Generic filter for config entries (check/sync) by target mode.
 /// --groups: entries whose groups intersect the specified groups.
-/// --hosts: entries whose hosts intersect the specified hosts.
-/// --all: entries where both groups and hosts are empty (global/unscoped entries).
+/// --hosts: entries where enable_hosts is true.
+/// --all: entries where enable_all is true.
 fn filter_entries_by_mode<'a, T>(
     entries: &'a [T],
     get_groups: impl Fn(&T) -> &Vec<String>,
-    get_hosts: impl Fn(&T) -> &Vec<String>,
+    get_enable_hosts: impl Fn(&T) -> bool,
+    get_enable_all: impl Fn(&T) -> bool,
     mode: &TargetMode,
 ) -> Vec<&'a T> {
     entries
         .iter()
-        .filter(|e| {
-            let groups = get_groups(e);
-            let hosts = get_hosts(e);
-            match mode {
-                TargetMode::All => groups.is_empty() && hosts.is_empty(),
-                TargetMode::Groups(g) => groups.iter().any(|eg| g.contains(eg)),
-                TargetMode::Hosts(h) => hosts.iter().any(|eh| h.contains(eh)),
-            }
+        .filter(|e| match mode {
+            TargetMode::All => get_enable_all(e),
+            TargetMode::Groups(g) => get_groups(e).iter().any(|eg| g.contains(eg)),
+            TargetMode::Hosts(_) => get_enable_hosts(e),
         })
         .collect()
 }

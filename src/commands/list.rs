@@ -29,7 +29,7 @@ pub async fn run(ctx: &Context) -> Result<()> {
         println!("  (none)");
     } else {
         for (i, entry) in checks.iter().enumerate() {
-            let scope = format_scope(&entry.groups, &entry.hosts);
+            let scope = format_scope(&entry.groups, entry.enable_hosts, entry.enable_all);
             println!("  [{}] scope: {}", i + 1, scope);
             if !entry.enabled.is_empty() {
                 println!("      enabled: {}", entry.enabled.join(", "));
@@ -46,7 +46,7 @@ pub async fn run(ctx: &Context) -> Result<()> {
         println!("  (none)");
     } else {
         for (i, entry) in syncs.iter().enumerate() {
-            let scope = format_scope(&entry.groups, &entry.hosts);
+            let scope = format_scope(&entry.groups, entry.enable_hosts, entry.enable_all);
             println!(
                 "  [{}] scope: {}  paths: {}",
                 i + 1,
@@ -59,12 +59,20 @@ pub async fn run(ctx: &Context) -> Result<()> {
     Ok(())
 }
 
-fn format_scope(groups: &[String], hosts: &[String]) -> String {
+fn format_scope(groups: &[String], enable_hosts: bool, enable_all: bool) -> String {
+    let mut parts = Vec::new();
     if !groups.is_empty() {
-        format!("groups=[{}]", groups.join(", "))
-    } else if !hosts.is_empty() {
-        format!("hosts=[{}]", hosts.join(", "))
-    } else {
+        parts.push(format!("groups=[{}]", groups.join(", ")));
+    }
+    if !enable_hosts {
+        parts.push("hosts=off".to_string());
+    }
+    if !enable_all {
+        parts.push("all=off".to_string());
+    }
+    if parts.is_empty() {
         "global".to_string()
+    } else {
+        parts.join(" ")
     }
 }

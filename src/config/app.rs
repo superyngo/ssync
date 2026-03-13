@@ -62,35 +62,46 @@ pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
 /// Inject helpful comments into TOML config for [settings], [[check]] and [[sync]] sections.
 fn inject_config_comments(toml_str: &str) -> String {
     let settings_comment = "\
-# [settings] 全域設定：
-#   state_dir = \"/custom/path/to/state\"  # 自訂 DB 存放位置
-#                                          # 預設: ~/.local/state/ssync (Linux/macOS)
-#                                          #        %LOCALAPPDATA%/ssync (Windows)
+# [settings] Global settings:
+#   state_dir = \"/custom/path/to/state\"  # Custom DB storage location
+#                                          # Default: ~/.local/state/ssync (Linux/macOS)
+#                                          #          %LOCALAPPDATA%/ssync (Windows)
 ";
 
     let check_comment = "\
-# [[check]] 可設定的 enabled 值：
+# [[check]] Available enabled values:
 # enabled = [
-#     \"online\",        # 檢查主機是否在線
-#     \"system_info\",   # 系統資訊 (uname / systeminfo)
-#     \"cpu_arch\",      # CPU 架構
-#     \"memory\",        # 記憶體使用量
-#     \"swap\",          # Swap 使用量
-#     \"disk\",          # 磁碟使用量
-#     \"cpu_load\",      # CPU 負載
-#     \"network\",       # 網路介面資訊
-#     \"battery\",       # 電池狀態
-#     \"ip_address\",    # IP 位址
+#     \"online\",        # Check if host is online
+#     \"system_info\",   # System info (uname / systeminfo)
+#     \"cpu_arch\",      # CPU architecture
+#     \"memory\",        # Memory usage
+#     \"swap\",          # Swap usage
+#     \"disk\",          # Disk usage
+#     \"cpu_load\",      # CPU load
+#     \"network\",       # Network interface info
+#     \"battery\",       # Battery status
+#     \"ip_address\",    # IP address
 # ]
-# groups = [\"web\"]       # 僅套用於指定 group (搭配 --group/-g 使用)
-# hosts  = [\"myhost\"]    # 僅套用於指定 host (搭配 --host/-h 使用)
-#                         # groups 和 hosts 皆為空 → 全域 (搭配 --all/-a 使用)
 #
-# [[check.path]] 可設定自訂路徑監控：
-#   path  = \"/var/log\"    # 要監控的路徑
-#   label = \"Logs\"        # 顯示用的標籤
+# ── Scoping ──
+# groups = [\"web\"]       # Apply only to specified groups (used with --group/-g)
 #
-# 範例：
+# ── Visibility controls (default: true) ──
+# enable_hosts = true     # Include this entry when using --host/-h mode
+#                         # Set to false to exclude from per-host checks
+# enable_all   = true     # Include this entry when using --all/-a mode
+#                         # Set to false to exclude from whole-fleet checks
+#
+# Note: When groups is non-empty, the entry is scoped to those groups
+#       and only selected with --group/-g (enable_hosts/enable_all are ignored).
+#       When groups is empty, the entry is unscoped and filtered by
+#       enable_hosts (--host/-h) or enable_all (--all/-a).
+#
+# [[check.path]] Custom path monitoring:
+#   path  = \"/var/log\"    # Path to monitor
+#   label = \"Logs\"        # Display label
+#
+# Examples:
 # [[check]]
 # enabled = [\"online\", \"memory\", \"disk\", \"cpu_load\", \"ip_address\"]
 #
@@ -100,28 +111,50 @@ fn inject_config_comments(toml_str: &str) -> String {
 # [[check.path]]
 # path = \"/var/log/nginx\"
 # label = \"Nginx Logs\"
+#
+# [[check]]
+# enabled = [\"online\", \"disk\"]
+# enable_hosts = false    # Only run with --all or --group, not --host
 ";
 
     let sync_comment = "\
-# [[sync]] 同步設定：
+# [[sync]] Sync settings:
 #
-# ── 全域同步 (搭配 --all/-a 使用，groups 和 hosts 皆為空) ──
+# ── Unscoped sync (used with --all/-a when groups is empty) ──
 # [[sync]]
-# paths = [\"/etc/timezone\"]            # 要同步的檔案路徑 (可多個)
-# recursive = false                    # 是否遞迴同步 (預設: false)
-# mode = \"0644\"                        # 檔案權限 (選填)
-# propagate_deletes = false            # 是否同步刪除 (選填, 預設: false)
-# source = \"myhost\"                    # 固定來源主機 (選填, 跳過自動選擇)
+# paths = [\"/etc/timezone\"]            # File paths to sync (multiple allowed)
+# recursive = false                    # Recursive sync (default: false)
+# mode = \"0644\"                        # File permissions (optional)
+# propagate_deletes = false            # Sync deletions (optional, default: false)
+# source = \"myhost\"                    # Fixed source host (optional, skips auto-selection)
 #
-# ── 群組同步 (搭配 --group/-g 使用) ──
+# ── Group sync (used with --group/-g) ──
 # [[sync]]
 # paths = [\"/etc/nginx/nginx.conf\", \"/etc/nginx/conf.d\"]
-# groups = [\"webservers\"]              # 套用的 group (對應 host[].groups)
+# groups = [\"webservers\"]              # Target groups (matches host[].groups)
 #
-# ── 主機同步 (搭配 --host/-h 使用) ──
+# ── Per-host sync (used with --host/-h) ──
 # [[sync]]
 # paths = [\"/etc/special.conf\"]
-# hosts = [\"special-host\"]             # 套用的 host (對應 host[].name)
+# hosts = [\"special-host\"]             # Target hosts (matches host[].name)
+#
+# ── Visibility controls (default: true) ──
+# enable_hosts = true     # Include this entry when using --host/-h mode
+#                         # Set to false to exclude from per-host syncs
+# enable_all   = true     # Include this entry when using --all/-a mode
+#                         # Set to false to exclude from whole-fleet syncs
+#
+# Note: When groups is non-empty, the entry is scoped to those groups
+#       and only selected with --group/-g (enable_hosts/enable_all are ignored).
+#       When groups is empty, the entry is unscoped and filtered by
+#       enable_hosts (--host/-h) or enable_all (--all/-a).
+#
+# Example: group-only sync that won't run with --all or --host:
+# [[sync]]
+# paths = [\"/etc/nginx/nginx.conf\"]
+# groups = [\"webservers\"]
+# enable_hosts = false
+# enable_all = false
 ";
 
     let mut result = String::new();

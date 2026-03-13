@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::IsTerminal;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -8,7 +7,6 @@ pub struct SyncProgress {
     multi: MultiProgress,
     host_bar: Option<ProgressBar>,
     collect_bar: Option<ProgressBar>,
-    transfer_bars: HashMap<String, ProgressBar>,
 }
 
 impl SyncProgress {
@@ -19,7 +17,6 @@ impl SyncProgress {
             multi: MultiProgress::new(),
             host_bar: None,
             collect_bar: None,
-            transfer_bars: HashMap::new(),
         }
     }
 
@@ -76,32 +73,6 @@ impl SyncProgress {
         }
     }
 
-    pub fn start_transfer(&mut self, path: &str, total_targets: usize) {
-        if !self.is_tty {
-            return;
-        }
-        let style = ProgressStyle::default_bar()
-            .template(" {prefix:>12} {bar:30.yellow/dim} {pos}/{len} {msg}")
-            .expect("valid template");
-        let bar = self.multi.add(ProgressBar::new(total_targets as u64));
-        bar.set_style(style);
-        bar.set_prefix("Transfer");
-        bar.set_message(path.to_string());
-        self.transfer_bars.insert(path.to_string(), bar);
-    }
-
-    pub fn target_transferred(&self, path: &str) {
-        if let Some(bar) = self.transfer_bars.get(path) {
-            bar.inc(1);
-        }
-    }
-
-    pub fn finish_transfer(&mut self, path: &str) {
-        if let Some(bar) = self.transfer_bars.remove(path) {
-            bar.finish();
-        }
-    }
-
     pub fn clear(&self) {
         if !self.is_tty {
             return;
@@ -130,11 +101,6 @@ mod tests {
         progress.host_collected();
         progress.host_collected();
         progress.finish_collect();
-
-        progress.start_transfer("/etc/hosts", 4);
-        progress.target_transferred("/etc/hosts");
-        progress.target_transferred("/etc/hosts");
-        progress.finish_transfer("/etc/hosts");
 
         progress.clear();
     }

@@ -1,37 +1,29 @@
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use anyhow::Result;
 
+use crate::config::schema::HostEntry;
 use crate::host::pool::SshPool;
 use crate::metrics::collector;
 use crate::output::printer;
 use crate::output::summary::Summary;
 use crate::state::retention;
 
-use super::Context;
+use super::{Context, TargetMode};
+
+/// Per-host check configuration: (enabled_metrics, check_paths).
+type HostCheckConfig = (Vec<String>, Vec<(String, String)>);
 
 pub async fn run(ctx: &Context) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
-    let checks = ctx.resolve_checks();
 
-    // Merge enabled metrics and paths from all applicable check entries
-    let mut enabled: Vec<String> = Vec::new();
-    let mut check_paths: Vec<(String, String)> = Vec::new();
-    for entry in &checks {
-        for m in &entry.enabled {
-            if !enabled.contains(m) {
-                enabled.push(m.clone());
-            }
-        }
-        for p in &entry.path {
-            let key = (p.path.clone(), p.label.clone());
-            if !check_paths.contains(&key) {
-                check_paths.push(key);
-            }
-        }
-    }
+    // Build per-host check config: each host gets its own (enabled, check_paths).
+    // For --groups: scoped by group membership with entry dedup.
+    // For --hosts/--all: flat merge of all matching entries.
+    let host_configs = build_host_check_configs(ctx, &hosts);
 
-    if enabled.is_empty() && check_paths.is_empty() {
+    if host_configs.is_empty() {
         println!("No check entries matched the current filter. Add [[check]] to config.toml.");
         return Ok(());
     }
@@ -72,9 +64,11 @@ pub async fn run(ctx: &Context) -> Result<()> {
 
     let mut handles = Vec::new();
     for host in &reachable {
+        let (enabled, check_paths) = match host_configs.get(&host.name) {
+            Some(config) => config.clone(),
+            None => continue,
+        };
         let host = (*host).clone();
-        let enabled = enabled.clone();
-        let check_paths = check_paths.clone();
         let timeout = ctx.timeout;
         let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
         let global_sem = pool.limiter.global_semaphore();
@@ -189,4 +183,77 @@ pub async fn run(ctx: &Context) -> Result<()> {
     retention::cleanup(&ctx.db, ctx.config.settings.data_retention_days)?;
 
     Ok(())
+}
+
+/// Build per-host check configuration based on target mode.
+/// For --groups: each host gets metrics only from entries matching its groups (with entry dedup).
+/// For --hosts/--all: all hosts get the same merged metrics (flat merge).
+fn build_host_check_configs(
+    ctx: &Context,
+    hosts: &[&HostEntry],
+) -> HashMap<String, HostCheckConfig> {
+    match &ctx.mode {
+        TargetMode::Groups(groups) => {
+            let mut configs = HashMap::new();
+            for host in hosts {
+                let mut enabled: Vec<String> = Vec::new();
+                let mut check_paths: Vec<(String, String)> = Vec::new();
+                let mut seen_entries = HashSet::new();
+
+                for group in &host.groups {
+                    if !groups.contains(group) {
+                        continue;
+                    }
+                    for entry in ctx.resolve_checks_for_group(group) {
+                        let ptr = std::ptr::from_ref(entry) as usize;
+                        if !seen_entries.insert(ptr) {
+                            continue;
+                        }
+                        for m in &entry.enabled {
+                            if !enabled.contains(m) {
+                                enabled.push(m.clone());
+                            }
+                        }
+                        for p in &entry.path {
+                            let key = (p.path.clone(), p.label.clone());
+                            if !check_paths.contains(&key) {
+                                check_paths.push(key);
+                            }
+                        }
+                    }
+                }
+
+                if !enabled.is_empty() || !check_paths.is_empty() {
+                    configs.insert(host.name.clone(), (enabled, check_paths));
+                }
+            }
+            configs
+        }
+        _ => {
+            // Flat merge for --hosts and --all
+            let checks = ctx.resolve_checks();
+            let mut enabled: Vec<String> = Vec::new();
+            let mut check_paths: Vec<(String, String)> = Vec::new();
+            for entry in &checks {
+                for m in &entry.enabled {
+                    if !enabled.contains(m) {
+                        enabled.push(m.clone());
+                    }
+                }
+                for p in &entry.path {
+                    let key = (p.path.clone(), p.label.clone());
+                    if !check_paths.contains(&key) {
+                        check_paths.push(key);
+                    }
+                }
+            }
+            let mut configs = HashMap::new();
+            if !enabled.is_empty() || !check_paths.is_empty() {
+                for host in hosts {
+                    configs.insert(host.name.clone(), (enabled.clone(), check_paths.clone()));
+                }
+            }
+            configs
+        }
+    }
 }

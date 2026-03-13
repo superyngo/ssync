@@ -187,6 +187,42 @@ pub async fn upload_pooled(
     Ok(())
 }
 
+/// Probe whether scp works to a remote host by uploading a 1-byte temp file.
+/// Tries /tmp first, falls back to ~/ if /tmp is unavailable.
+/// Cleans up the probe file after testing.
+pub async fn scp_probe(host: &HostEntry, timeout_secs: u64, socket: Option<&Path>) -> Result<()> {
+    // Create a local 1-byte temp file
+    let temp_dir = tempfile::tempdir().context("Failed to create temp dir for scp probe")?;
+    let local_probe = temp_dir.path().join("ssync_probe");
+    std::fs::write(&local_probe, b"0").context("Failed to write probe file")?;
+
+    // Try /tmp first, then fallback to ~/
+    let probe_paths = ["/tmp/.ssync_probe", "~/.ssync_probe"];
+
+    let mut last_err = None;
+    for remote_path in &probe_paths {
+        match upload_pooled(host, &local_probe, remote_path, timeout_secs, socket).await {
+            Ok(()) => {
+                // Clean up: remove the probe file via ssh (best-effort)
+                let rm_cmd = if *remote_path == "~/.ssync_probe" {
+                    "rm -f \"$HOME/.ssync_probe\" 2>/dev/null; exit 0".to_string()
+                } else {
+                    format!("rm -f '{}' 2>/dev/null; exit 0", remote_path)
+                };
+                let _ = run_remote_pooled(host, &rm_cmd, timeout_secs, socket).await;
+                return Ok(());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                // If /tmp failed, try ~/
+                continue;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("scp probe failed")))
+}
+
 /// Download a file via scp, optionally reusing a ControlMaster socket.
 pub async fn download_pooled(
     host: &HostEntry,
