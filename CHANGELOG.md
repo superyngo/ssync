@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-03-13
+
+### Added
+- SSH connection pooling for improved performance
+- Batch metadata collection with parallel operations
+- Per-host concurrency configuration
+- Skip reasons tracking for sync operations
+- Progress display enhancements
+- ConcurrencyLimiter and pooled SSH executor functions
+- SSH ConnectionManager with per-file skip on missing source
+- Batched metadata command builder and parser
+
+### Changed
+- Complete sync pipeline optimization with batched collection and parallel distribution
+- Rewrote check, exec, run, and init commands to use pooled executor
+- Replaced inline ConnectionManager with SshPool
+
+### Docs
+- Sync pipeline optimization implementation plan
+- Sync pipeline optimization design spec
+
 ## [v0.2.0] - 2026-03-11
 
 ### Added
