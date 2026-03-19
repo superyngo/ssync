@@ -23,6 +23,51 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
     let config_exists = crate::config::app::resolve_path(ctx.config_path.as_deref())?.exists();
     let effective_update = update || config_exists;
 
+    let mut stale_hosts_removed = false;
+    let mut stale_host_names: Vec<String> = Vec::new();
+
+    if config_exists {
+        // Detect hosts in ssync config that no longer exist in ~/.ssh/config
+        let ssh_host_names: std::collections::HashSet<&str> =
+            ssh_hosts.iter().map(|h| h.name.as_str()).collect();
+        stale_host_names = ctx
+            .config
+            .host
+            .iter()
+            .filter(|h| !ssh_host_names.contains(h.ssh_host.as_str()))
+            .map(|h| h.ssh_host.clone())
+            .collect();
+
+        if !stale_host_names.is_empty() {
+            println!(
+                "\nFound {} host(s) no longer in ~/.ssh/config:",
+                stale_host_names.len()
+            );
+            for name in &stale_host_names {
+                println!("  - {}", name);
+            }
+
+            if dry_run {
+                println!(
+                    "[dry-run] Would remove {} stale host(s).",
+                    stale_host_names.len()
+                );
+            } else {
+                print!(
+                    "Remove these {} host(s) from ssync config? [y/N]: ",
+                    stale_host_names.len()
+                );
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if answer.trim().eq_ignore_ascii_case("y") {
+                    stale_hosts_removed = true;
+                    println!("Removed {} stale host(s).", stale_host_names.len());
+                }
+            }
+        }
+    }
+
     // Merge CLI --skip with persisted skipped_hosts
     let persisted_skips = &ctx.config.settings.skipped_hosts;
     let all_skips: Vec<String> = persisted_skips
@@ -141,13 +186,16 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
             return Ok(());
         }
 
-        if new_hosts.is_empty() && skip.is_empty() {
+        if new_hosts.is_empty() && skip.is_empty() && !stale_hosts_removed {
             println!("No new hosts to add.");
             return Ok(());
         }
 
         // Merge with existing config
         let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        if stale_hosts_removed {
+            config.host.retain(|h| !stale_host_names.contains(&h.ssh_host));
+        }
         for host in new_hosts {
             if let Some(existing) = config.host.iter_mut().find(|h| h.ssh_host == host.ssh_host) {
                 existing.shell = host.shell;
@@ -179,11 +227,24 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         }
 
         let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        if stale_hosts_removed {
+            config.host.retain(|h| !stale_host_names.contains(&h.ssh_host));
+            stale_hosts_removed = false;
+        }
         for s in &skip {
             if !config.settings.skipped_hosts.contains(s) {
                 config.settings.skipped_hosts.push(s.clone());
             }
         }
+        crate::config::app::save(&config, ctx.config_path.as_deref())?;
+        let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
+        println!("\nConfig saved to {}", saved_path.display());
+    }
+
+    // Save if only stale hosts were removed (no other changes triggered a save)
+    if stale_hosts_removed {
+        let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
+        config.host.retain(|h| !stale_host_names.contains(&h.ssh_host));
         crate::config::app::save(&config, ctx.config_path.as_deref())?;
         let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
         println!("\nConfig saved to {}", saved_path.display());
