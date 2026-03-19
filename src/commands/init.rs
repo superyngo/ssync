@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use crate::config::schema::HostEntry;
 use crate::config::ssh_config;
@@ -26,6 +26,161 @@ fn partition_host_key_failures(
         }
     }
     (host_key_failures, other_failures)
+}
+
+/// Resolve the actual hostname and port for an SSH alias using `ssh -G`.
+/// Returns (hostname, port). Falls back to (alias, "22") on failure.
+#[allow(dead_code)]
+async fn resolve_ssh_host_port(alias: &str) -> (String, String) {
+    let output = tokio::process::Command::new("ssh")
+        .arg("-G")
+        .arg(alias)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await;
+
+    let mut hostname = alias.to_string();
+    let mut port = "22".to_string();
+
+    if let Ok(out) = output {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("hostname ") {
+                hostname = val.trim().to_string();
+            } else if let Some(val) = line.strip_prefix("port ") {
+                port = val.trim().to_string();
+            }
+        }
+    }
+
+    (hostname, port)
+}
+
+/// Run ssh-keyscan for a single host and return the output lines (key entries).
+/// Returns Ok(output) on success, Err on failure or empty output.
+#[allow(dead_code)]
+async fn keyscan_host(alias: &str, timeout_secs: u64) -> Result<String> {
+    let (hostname, port) = resolve_ssh_host_port(alias).await;
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("ssh-keyscan")
+            .arg("-H")
+            .arg("-p")
+            .arg(&port)
+            .arg(&hostname)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .context("ssh-keyscan timeout")?
+    .context("Failed to run ssh-keyscan")?;
+
+    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+
+    // Filter out empty lines and comments
+    let key_lines: String = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if key_lines.is_empty() {
+        anyhow::bail!("ssh-keyscan returned no keys for {}", alias);
+    }
+
+    Ok(key_lines)
+}
+
+/// Run ssh-keyscan for multiple hosts in parallel and append results to ~/.ssh/known_hosts.
+/// Returns the list of host names that were successfully keyscanned.
+#[allow(dead_code)]
+async fn batch_keyscan_and_accept(
+    hosts: &[(String, String)],
+    timeout_secs: u64,
+    concurrency: usize,
+) -> Vec<String> {
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut handles = Vec::new();
+
+    for (name, _err) in hosts {
+        let sem = semaphore.clone();
+        let alias = name.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let result = keyscan_host(&alias, timeout_secs).await;
+            (alias, result)
+        }));
+    }
+
+    let mut all_keys = String::new();
+    let mut succeeded = Vec::new();
+
+    for handle in handles {
+        match handle.await {
+            Ok((alias, Ok(keys))) => {
+                if !all_keys.is_empty() {
+                    all_keys.push('\n');
+                }
+                all_keys.push_str(&keys);
+                succeeded.push(alias.clone());
+                printer::print_host_line(&alias, "ok", "host key accepted");
+            }
+            Ok((alias, Err(e))) => {
+                printer::print_host_line(&alias, "error", &format!("keyscan failed: {}", e));
+            }
+            Err(e) => {
+                tracing::warn!("keyscan task panicked: {}", e);
+            }
+        }
+    }
+
+    // Append all keys to ~/.ssh/known_hosts in one operation
+    if !all_keys.is_empty() {
+        let known_hosts_path = dirs::home_dir()
+            .map(|h| h.join(".ssh").join("known_hosts"))
+            .expect("Could not determine home directory");
+
+        // Ensure the .ssh directory exists
+        if let Some(parent) = known_hosts_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // Ensure trailing newline before appending
+        let mut content = String::new();
+        if known_hosts_path.exists() {
+            if let Ok(existing) = std::fs::read_to_string(&known_hosts_path) {
+                if !existing.ends_with('\n') && !existing.is_empty() {
+                    content.push('\n');
+                }
+            }
+        }
+        content.push_str(&all_keys);
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&known_hosts_path)
+        {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(content.as_bytes()) {
+                    eprintln!("Warning: failed to write known_hosts: {}", e);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to open known_hosts: {}", e);
+            }
+        }
+    }
+
+    succeeded
 }
 
 pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) -> Result<()> {
