@@ -11,7 +11,6 @@ use crate::output::summary::Summary;
 use super::Context;
 
 /// Partition connection failures into host-key verification errors and other errors.
-#[allow(dead_code)] // Will be used in subsequent tasks
 #[allow(clippy::type_complexity)]
 fn partition_host_key_failures(
     failures: Vec<(String, String)>,
@@ -30,7 +29,6 @@ fn partition_host_key_failures(
 
 /// Resolve the actual hostname and port for an SSH alias using `ssh -G`.
 /// Returns (hostname, port). Falls back to (alias, "22") on failure.
-#[allow(dead_code)]
 async fn resolve_ssh_host_port(alias: &str) -> (String, String) {
     let output = tokio::process::Command::new("ssh")
         .arg("-G")
@@ -60,7 +58,6 @@ async fn resolve_ssh_host_port(alias: &str) -> (String, String) {
 
 /// Run ssh-keyscan for a single host and return the output lines (key entries).
 /// Returns Ok(output) on success, Err on failure or empty output.
-#[allow(dead_code)]
 async fn keyscan_host(alias: &str, timeout_secs: u64) -> Result<String> {
     let (hostname, port) = resolve_ssh_host_port(alias).await;
 
@@ -97,7 +94,6 @@ async fn keyscan_host(alias: &str, timeout_secs: u64) -> Result<String> {
 
 /// Run ssh-keyscan for multiple hosts in parallel and append results to ~/.ssh/known_hosts.
 /// Returns the list of host names that were successfully keyscanned.
-#[allow(dead_code)]
 async fn batch_keyscan_and_accept(
     hosts: &[(String, String)],
     timeout_secs: u64,
@@ -300,14 +296,99 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         let failed_count = entry_refs.len() - connected;
         progress.finish_host_check(connected, failed_count);
 
-        // Report unreachable hosts
-        for (name, err) in conn_mgr.failed_hosts() {
-            printer::print_host_line(&name, "error", &err.to_string());
-            summary.add_failure(&name, &err);
+        // Partition failures: host key errors vs other errors
+        let (host_key_failures, other_failures) =
+            partition_host_key_failures(conn_mgr.failed_hosts());
+
+        // Report non-host-key errors immediately
+        for (name, err) in &other_failures {
+            printer::print_host_line(name, "error", err);
+            summary.add_failure(name, err);
+        }
+
+        // Handle host key verification failures
+        let mut retry_conn_mgr: Option<ConnectionManager> = None;
+        if !host_key_failures.is_empty() {
+            if dry_run {
+                for (name, _err) in &host_key_failures {
+                    printer::print_host_line(name, "skip", "unknown host key (dry-run, skipped)");
+                    summary.add_skip();
+                }
+            } else {
+                println!(
+                    "\n{} host(s) have unknown SSH host keys:",
+                    host_key_failures.len()
+                );
+                for (name, _err) in &host_key_failures {
+                    println!("  - {}", name);
+                }
+                print!("Add to known_hosts and retry? [y/N]: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+
+                if answer.trim().eq_ignore_ascii_case("y") {
+                    let accepted = batch_keyscan_and_accept(
+                        &host_key_failures,
+                        ctx.timeout,
+                        ctx.concurrency(),
+                    )
+                    .await;
+
+                    // Report hosts where keyscan failed
+                    for (name, _err) in &host_key_failures {
+                        if !accepted.contains(name) {
+                            printer::print_host_line(name, "error", "keyscan failed");
+                            summary.add_failure(name, "keyscan failed");
+                        }
+                    }
+
+                    // Retry connection for accepted hosts
+                    if !accepted.is_empty() {
+                        let retry_entries: Vec<HostEntry> = accepted
+                            .iter()
+                            .map(|name| HostEntry {
+                                name: name.clone(),
+                                ssh_host: name.clone(),
+                                shell: crate::config::schema::ShellType::Sh,
+                                groups: Vec::new(),
+                            })
+                            .collect();
+                        let retry_refs: Vec<&HostEntry> = retry_entries.iter().collect();
+
+                        let mut retry_cm = ConnectionManager::new()?;
+                        println!("\nRetrying {} host(s)...", accepted.len());
+                        progress.start_host_check(retry_refs.len());
+                        let retry_connected = retry_cm
+                            .pre_check(&retry_refs, ctx.timeout, ctx.concurrency())
+                            .await;
+                        let retry_failed = retry_refs.len() - retry_connected;
+                        progress.finish_host_check(retry_connected, retry_failed);
+
+                        // Report retry failures
+                        for (name, err) in retry_cm.failed_hosts() {
+                            printer::print_host_line(&name, "error", &err);
+                            summary.add_failure(&name, &err);
+                        }
+
+                        retry_conn_mgr = Some(retry_cm);
+                    }
+                } else {
+                    // User declined — report as errors
+                    for (name, err) in &host_key_failures {
+                        printer::print_host_line(name, "error", err);
+                        summary.add_failure(name, err);
+                    }
+                }
+            }
         }
 
         // Detect shell type on reachable hosts using pooled connections
-        let reachable = conn_mgr.reachable_hosts();
+        // Merge reachable hosts from both connection managers
+        let mut reachable = conn_mgr.reachable_hosts();
+        if let Some(ref rcm) = retry_conn_mgr {
+            reachable.extend(rcm.reachable_hosts());
+        }
         let global_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(ctx.concurrency()));
 
         let mut handles = Vec::new();
@@ -315,7 +396,14 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
             let sem = global_sem.clone();
             let host_name = host_name.clone();
             let timeout = ctx.timeout;
-            let socket = conn_mgr.socket_for(&host_name).map(|p| p.to_path_buf());
+            let socket = conn_mgr
+                .socket_for(&host_name)
+                .or_else(|| {
+                    retry_conn_mgr
+                        .as_ref()
+                        .and_then(|rcm| rcm.socket_for(&host_name))
+                })
+                .map(|p| p.to_path_buf());
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
@@ -351,6 +439,9 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         }
 
         conn_mgr.shutdown().await;
+        if let Some(mut rcm) = retry_conn_mgr {
+            rcm.shutdown().await;
+        }
         progress.clear();
         summary.print();
 
@@ -367,7 +458,9 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         // Merge with existing config
         let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
         if stale_hosts_removed {
-            config.host.retain(|h| !stale_host_names.contains(&h.ssh_host));
+            config
+                .host
+                .retain(|h| !stale_host_names.contains(&h.ssh_host));
         }
         for host in new_hosts {
             if let Some(existing) = config.host.iter_mut().find(|h| h.ssh_host == host.ssh_host) {
@@ -401,7 +494,9 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
 
         let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
         if stale_hosts_removed {
-            config.host.retain(|h| !stale_host_names.contains(&h.ssh_host));
+            config
+                .host
+                .retain(|h| !stale_host_names.contains(&h.ssh_host));
             stale_hosts_removed = false;
         }
         for s in &skip {
@@ -417,7 +512,9 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
     // Save if only stale hosts were removed (no other changes triggered a save)
     if stale_hosts_removed {
         let mut config = crate::config::app::load(ctx.config_path.as_deref())?.unwrap_or_default();
-        config.host.retain(|h| !stale_host_names.contains(&h.ssh_host));
+        config
+            .host
+            .retain(|h| !stale_host_names.contains(&h.ssh_host));
         crate::config::app::save(&config, ctx.config_path.as_deref())?;
         let saved_path = crate::config::app::resolve_path(ctx.config_path.as_deref())?;
         println!("\nConfig saved to {}", saved_path.display());
@@ -433,9 +530,15 @@ mod tests {
     #[test]
     fn test_partition_host_key_failures_mixed() {
         let failures = vec![
-            ("host-a".to_string(), "ControlMaster failed: Host key verification failed.".to_string()),
+            (
+                "host-a".to_string(),
+                "ControlMaster failed: Host key verification failed.".to_string(),
+            ),
             ("host-b".to_string(), "Connection refused".to_string()),
-            ("host-c".to_string(), "ControlMaster failed: Host key verification failed.".to_string()),
+            (
+                "host-c".to_string(),
+                "ControlMaster failed: Host key verification failed.".to_string(),
+            ),
         ];
         let (hk, other) = partition_host_key_failures(failures);
         assert_eq!(hk.len(), 2);
@@ -447,9 +550,7 @@ mod tests {
 
     #[test]
     fn test_partition_host_key_failures_none() {
-        let failures = vec![
-            ("host-a".to_string(), "Connection timeout".to_string()),
-        ];
+        let failures = vec![("host-a".to_string(), "Connection timeout".to_string())];
         let (hk, other) = partition_host_key_failures(failures);
         assert!(hk.is_empty());
         assert_eq!(other.len(), 1);
@@ -457,9 +558,10 @@ mod tests {
 
     #[test]
     fn test_partition_host_key_failures_all() {
-        let failures = vec![
-            ("host-a".to_string(), "Host key verification failed.".to_string()),
-        ];
+        let failures = vec![(
+            "host-a".to_string(),
+            "Host key verification failed.".to_string(),
+        )];
         let (hk, other) = partition_host_key_failures(failures);
         assert_eq!(hk.len(), 1);
         assert!(other.is_empty());
