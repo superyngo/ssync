@@ -151,12 +151,29 @@ pub struct SyncSummary {
     pub transfers_synced: usize,
     pub transfers_failed: usize,
 
+    // Transfer-level hostname tracking
+    pub transfers_passed_hosts: Vec<String>,
+    pub transfers_synced_hosts: Vec<String>,
+    pub transfers_failed_hosts: Vec<String>,
+
     // Error/skip details (reuse existing types)
     pub errors: Vec<ErrorEntry>,
     pub skip_reasons: Vec<SkipReason>,
 }
 
 impl SyncSummary {
+    /// Deduplicate a hostname list (preserving first-seen order) and join with ", ".
+    pub fn format_hosts(hosts: &[String]) -> String {
+        let mut seen = std::collections::HashSet::new();
+        let mut order = Vec::new();
+        for h in hosts {
+            if seen.insert(h) {
+                order.push(h.as_str());
+            }
+        }
+        order.join(", ")
+    }
+
     /// Record the result of syncing a single file across hosts.
     ///
     /// - `passed`: hosts already in sync (no transfer needed)
@@ -173,7 +190,11 @@ impl SyncSummary {
         self.transfers_synced += synced.len();
         self.transfers_failed += failed.len();
 
+        self.transfers_passed_hosts.extend_from_slice(passed);
+        self.transfers_synced_hosts.extend_from_slice(synced);
+
         for (host, msg) in failed {
+            self.transfers_failed_hosts.push(host.clone());
             self.errors.push(ErrorEntry {
                 host: host.clone(),
                 message: msg.clone(),
@@ -193,12 +214,14 @@ impl SyncSummary {
     /// Record a file that is already fully in sync across all hosts (no transfers needed).
     pub fn file_in_sync(&mut self, passed_hosts: &[&str]) {
         self.transfers_passed += passed_hosts.len();
+        self.transfers_passed_hosts.extend(passed_hosts.iter().map(|s| s.to_string()));
         self.files_synced += 1;
     }
 
     /// Record a host-level failure (unreachable, scp-unsupported) — not file-scoped.
     pub fn add_host_failure(&mut self, host: &str, message: &str) {
         self.transfers_failed += 1;
+        self.transfers_failed_hosts.push(host.to_string());
         self.errors.push(ErrorEntry {
             host: host.to_string(),
             message: message.to_string(),
@@ -241,13 +264,16 @@ impl SyncSummary {
         // Transfer-level line
         let mut xfer_parts = Vec::new();
         if self.transfers_passed > 0 {
-            xfer_parts.push(format!("{} passed", self.transfers_passed));
+            let hosts = Self::format_hosts(&self.transfers_passed_hosts);
+            xfer_parts.push(format!("{} passed({})", self.transfers_passed, hosts));
         }
         if self.transfers_synced > 0 {
-            xfer_parts.push(format!("{} synced", self.transfers_synced));
+            let hosts = Self::format_hosts(&self.transfers_synced_hosts);
+            xfer_parts.push(format!("{} synced({})", self.transfers_synced, hosts));
         }
         if self.transfers_failed > 0 {
-            xfer_parts.push(format!("{} failed", self.transfers_failed));
+            let hosts = Self::format_hosts(&self.transfers_failed_hosts);
+            xfer_parts.push(format!("{} failed({})", self.transfers_failed, hosts));
         }
         if !xfer_parts.is_empty() {
             println!("  Transfers:  {}", xfer_parts.join("  "));
@@ -475,5 +501,56 @@ mod tests {
         assert_eq!(s.transfers_passed, 4 + 3); // 4 from in_sync + 3 passed
         assert_eq!(s.transfers_synced, 0);
         assert_eq!(s.transfers_failed, 1 + 1); // 1 host failure + 1 file failure
+    }
+
+    #[test]
+    fn test_sync_summary_tracks_passed_hosts() {
+        let mut s = SyncSummary::default();
+        s.file_in_sync(&["host-a", "host-b", "host-c"]);
+        assert_eq!(s.transfers_passed_hosts, vec!["host-a", "host-b", "host-c"]);
+    }
+
+    #[test]
+    fn test_sync_summary_tracks_synced_hosts() {
+        let mut s = SyncSummary::default();
+        s.complete_file(
+            "~/.bashrc",
+            &["host-a".to_string()],
+            &["host-b".to_string(), "host-c".to_string()],
+            &[],
+        );
+        assert_eq!(s.transfers_passed_hosts, vec!["host-a"]);
+        assert_eq!(s.transfers_synced_hosts, vec!["host-b", "host-c"]);
+    }
+
+    #[test]
+    fn test_sync_summary_tracks_failed_hosts() {
+        let mut s = SyncSummary::default();
+        s.complete_file(
+            "~/config",
+            &[],
+            &[],
+            &[
+                ("host-a".to_string(), "download failed".to_string()),
+                ("host-b".to_string(), "download failed".to_string()),
+            ],
+        );
+        assert_eq!(s.transfers_failed_hosts, vec!["host-a", "host-b"]);
+    }
+
+    #[test]
+    fn test_sync_summary_tracks_host_failure_hosts() {
+        let mut s = SyncSummary::default();
+        s.add_host_failure("host-x", "unreachable");
+        assert_eq!(s.transfers_failed_hosts, vec!["host-x"]);
+    }
+
+    #[test]
+    fn test_sync_summary_deduplicates_hosts_in_format() {
+        let mut s = SyncSummary::default();
+        s.complete_file("~/.bashrc", &[], &["host-a".to_string()], &[]);
+        s.complete_file("~/.zshrc", &[], &["host-a".to_string()], &[]);
+        assert_eq!(s.transfers_synced, 2);
+        assert_eq!(SyncSummary::format_hosts(&s.transfers_synced_hosts), "host-a");
     }
 }
