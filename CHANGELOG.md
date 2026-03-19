@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-03-19
+
+### Added
+- SSH host key acceptance during init with interactive prompt
+- SSH host resolution and keyscan helpers for batch operations
+- Partition helper for host key failure handling
+- Stale host detection and removal prompt during init
+- Hostname display in sync summary transfer lines
+
+### Changed
+- Enhanced init workflow with host key management
+- Improved sync summary with clearer host identification
+
+### Docs
+- Implementation plan for init host key acceptance
+- Design spec for init host key acceptance feature
+- Implementation plan for init stale hosts, summary hostnames, version verification
+- Design spec for init stale host detection, summary hostnames, version verification
+
+### CI
+- Version verification step in release workflow
+
 ## [v0.3.0] - 2026-03-13
 
 ### Added
