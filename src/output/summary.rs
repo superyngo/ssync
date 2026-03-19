@@ -214,7 +214,8 @@ impl SyncSummary {
     /// Record a file that is already fully in sync across all hosts (no transfers needed).
     pub fn file_in_sync(&mut self, passed_hosts: &[&str]) {
         self.transfers_passed += passed_hosts.len();
-        self.transfers_passed_hosts.extend(passed_hosts.iter().map(|s| s.to_string()));
+        self.transfers_passed_hosts
+            .extend(passed_hosts.iter().map(|s| s.to_string()));
         self.files_synced += 1;
     }
 
@@ -551,6 +552,9 @@ mod tests {
         s.complete_file("~/.bashrc", &[], &["host-a".to_string()], &[]);
         s.complete_file("~/.zshrc", &[], &["host-a".to_string()], &[]);
         assert_eq!(s.transfers_synced, 2);
-        assert_eq!(SyncSummary::format_hosts(&s.transfers_synced_hosts), "host-a");
+        assert_eq!(
+            SyncSummary::format_hosts(&s.transfers_synced_hosts),
+            "host-a"
+        );
     }
 }
