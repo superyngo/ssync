@@ -10,6 +10,24 @@ use crate::output::summary::Summary;
 
 use super::Context;
 
+/// Partition connection failures into host-key verification errors and other errors.
+#[allow(dead_code)] // Will be used in subsequent tasks
+#[allow(clippy::type_complexity)]
+fn partition_host_key_failures(
+    failures: Vec<(String, String)>,
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let mut host_key_failures = Vec::new();
+    let mut other_failures = Vec::new();
+    for (name, err) in failures {
+        if err.contains("Host key verification failed") {
+            host_key_failures.push((name, err));
+        } else {
+            other_failures.push((name, err));
+        }
+    }
+    (host_key_failures, other_failures)
+}
+
 pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) -> Result<()> {
     println!("Scanning ~/.ssh/config...");
     let ssh_hosts = ssh_config::parse_ssh_config()?;
@@ -251,4 +269,44 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_partition_host_key_failures_mixed() {
+        let failures = vec![
+            ("host-a".to_string(), "ControlMaster failed: Host key verification failed.".to_string()),
+            ("host-b".to_string(), "Connection refused".to_string()),
+            ("host-c".to_string(), "ControlMaster failed: Host key verification failed.".to_string()),
+        ];
+        let (hk, other) = partition_host_key_failures(failures);
+        assert_eq!(hk.len(), 2);
+        assert_eq!(hk[0].0, "host-a");
+        assert_eq!(hk[1].0, "host-c");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].0, "host-b");
+    }
+
+    #[test]
+    fn test_partition_host_key_failures_none() {
+        let failures = vec![
+            ("host-a".to_string(), "Connection timeout".to_string()),
+        ];
+        let (hk, other) = partition_host_key_failures(failures);
+        assert!(hk.is_empty());
+        assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn test_partition_host_key_failures_all() {
+        let failures = vec![
+            ("host-a".to_string(), "Host key verification failed.".to_string()),
+        ];
+        let (hk, other) = partition_host_key_failures(failures);
+        assert_eq!(hk.len(), 1);
+        assert!(other.is_empty());
+    }
 }
