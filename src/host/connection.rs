@@ -8,18 +8,29 @@ use tokio::process::Command;
 use crate::config::schema::HostEntry;
 use crate::host::executor;
 
+/// Connection pooling strategy.
+enum ConnectionMode {
+    /// Unix: ControlMaster connection pooling with socket directory.
+    Pooled { socket_dir: tempfile::TempDir },
+    /// Windows/fallback: no persistent connections, each SSH call is independent.
+    Direct,
+}
+
 /// State of an SSH connection to a host.
 #[derive(Debug, Clone)]
 pub enum ConnectionState {
     Connected { socket_path: PathBuf },
+    /// Host reachable but no persistent socket (Direct mode on Windows).
+    DirectConnected,
     Failed { error: String },
 }
 
-/// Manages SSH ControlMaster connections for connection reuse.
-/// Establishes persistent master connections during pre-check,
+/// Manages SSH connections for connection reuse.
+/// On Unix, establishes persistent ControlMaster connections during pre-check,
 /// then provides socket paths for subsequent operations.
+/// On Windows, uses direct (non-pooled) SSH connections.
 pub struct ConnectionManager {
-    socket_dir: tempfile::TempDir,
+    mode: ConnectionMode,
     hosts: HashMap<String, ConnectionState>,
     /// Maps host name → ssh_host for shutdown/drop (ssh -O exit needs the ssh_host, not name).
     host_map: HashMap<String, String>,
@@ -28,22 +39,30 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    /// Create a new ConnectionManager with a temporary socket directory.
-    /// Uses /tmp/ssync-XXXX/ to keep socket paths short (macOS ~104 byte limit).
+    /// Create a new ConnectionManager.
+    /// On Unix, creates a temporary socket directory for ControlMaster pooling.
+    /// On Windows, uses Direct mode (no persistent connections).
     pub fn new() -> Result<Self> {
-        let socket_dir = tempfile::Builder::new()
-            .prefix("ssync-")
-            .tempdir_in("/tmp")
-            .context("Failed to create socket directory")?;
+        let mode = if cfg!(target_os = "windows") {
+            ConnectionMode::Direct
+        } else {
+            let socket_dir = tempfile::Builder::new()
+                .prefix("ssync-")
+                .tempdir_in("/tmp")
+                .context("Failed to create socket directory")?;
+            ConnectionMode::Pooled { socket_dir }
+        };
         Ok(Self {
-            socket_dir,
+            mode,
             hosts: HashMap::new(),
             host_map: HashMap::new(),
             scp_failed: HashMap::new(),
         })
     }
 
-    /// Establish ControlMaster connections to all hosts in parallel.
+    /// Establish connections to all hosts in parallel.
+    /// In Pooled mode, establishes ControlMaster connections.
+    /// In Direct mode, performs lightweight connectivity checks.
     /// Returns the number of successfully connected hosts.
     pub async fn pre_check(
         &mut self,
@@ -51,23 +70,27 @@ impl ConnectionManager {
         timeout_secs: u64,
         concurrency: usize,
     ) -> usize {
+        let is_pooled = matches!(self.mode, ConnectionMode::Pooled { .. });
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
         let mut handles = Vec::new();
 
         for host in hosts {
             let sem = semaphore.clone();
             let host = (*host).clone();
-            let socket_path = self.socket_path_for(&host.name);
+            let socket_path = if is_pooled {
+                Some(self.socket_path_for(&host.name))
+            } else {
+                None
+            };
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                let result = establish_master(&host, &socket_path, timeout_secs).await;
-                (
-                    host.name.clone(),
-                    host.ssh_host.clone(),
-                    socket_path,
-                    result,
-                )
+                let result = if let Some(ref sp) = socket_path {
+                    establish_master(&host, sp, timeout_secs).await
+                } else {
+                    check_connectivity(&host, timeout_secs).await
+                };
+                (host.name.clone(), host.ssh_host.clone(), socket_path, result)
             }));
         }
 
@@ -75,8 +98,11 @@ impl ConnectionManager {
         for handle in handles {
             match handle.await {
                 Ok((name, ssh_host, socket_path, Ok(()))) => {
-                    self.hosts
-                        .insert(name.clone(), ConnectionState::Connected { socket_path });
+                    let state = match socket_path {
+                        Some(sp) => ConnectionState::Connected { socket_path: sp },
+                        None => ConnectionState::DirectConnected,
+                    };
+                    self.hosts.insert(name.clone(), state);
                     self.host_map.insert(name, ssh_host);
                     connected += 1;
                 }
@@ -98,8 +124,11 @@ impl ConnectionManager {
         connected
     }
 
-    /// Get the socket path for a connected host, or None if not connected.
+    /// Get the socket path for a connected host, or None if not connected or in Direct mode.
     pub fn socket_for(&self, host_name: &str) -> Option<&Path> {
+        if matches!(self.mode, ConnectionMode::Direct) {
+            return None;
+        }
         match self.hosts.get(host_name) {
             Some(ConnectionState::Connected { socket_path }) => Some(socket_path),
             _ => None,
@@ -123,7 +152,9 @@ impl ConnectionManager {
         self.hosts
             .iter()
             .filter_map(|(name, state)| match state {
-                ConnectionState::Connected { .. } => Some(name.clone()),
+                ConnectionState::Connected { .. } | ConnectionState::DirectConnected => {
+                    Some(name.clone())
+                }
                 _ => None,
             })
             .collect()
@@ -203,8 +234,13 @@ impl ConnectionManager {
     }
 
     /// Async shutdown: gracefully close all ControlMaster connections.
+    /// In Direct mode, just clears state (no sockets to close).
     /// Preferred over Drop (which uses blocking I/O as a safety net).
     pub async fn shutdown(&mut self) {
+        if matches!(self.mode, ConnectionMode::Direct) {
+            self.hosts.clear();
+            return;
+        }
         for (name, state) in &self.hosts {
             if let ConnectionState::Connected { socket_path } = state {
                 let ssh_host = self.host_map.get(name).map(|s| s.as_str()).unwrap_or(name);
@@ -228,15 +264,23 @@ impl ConnectionManager {
 
     /// Compute the socket path for a given host name.
     /// Uses a short hash to keep path length under macOS 104-byte limit.
+    /// Only valid in Pooled mode.
     fn socket_path_for(&self, host_name: &str) -> PathBuf {
+        let socket_dir = match &self.mode {
+            ConnectionMode::Pooled { socket_dir } => socket_dir,
+            ConnectionMode::Direct => unreachable!("socket_path_for called in Direct mode"),
+        };
         let hash = blake3::hash(host_name.as_bytes());
         let short_hash = &hash.to_hex()[..12];
-        self.socket_dir.path().join(short_hash)
+        socket_dir.path().join(short_hash)
     }
 }
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
+        if matches!(self.mode, ConnectionMode::Direct) {
+            return;
+        }
         // Safety net: try to close masters with blocking I/O
         for (name, state) in &self.hosts {
             if let ConnectionState::Connected { socket_path } = state {
@@ -253,6 +297,35 @@ impl Drop for ConnectionManager {
             }
         }
     }
+}
+
+/// Lightweight connectivity check for Direct mode.
+/// Runs `ssh -o BatchMode=yes -o ConnectTimeout=N host exit 0`.
+async fn check_connectivity(host: &HostEntry, timeout_secs: u64) -> Result<()> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        Command::new("ssh")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", timeout_secs))
+            .arg(&host.ssh_host)
+            .arg("exit")
+            .arg("0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .context("SSH connectivity check timeout")?
+    .context("Failed to run SSH connectivity check")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("SSH connectivity check failed: {}", stderr.trim());
+    }
+
+    Ok(())
 }
 
 /// Establish a ControlMaster connection to a host.
@@ -293,6 +366,7 @@ async fn establish_master(host: &HostEntry, socket_path: &Path, timeout_secs: u6
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_socket_path_short_enough() {
         let mgr = ConnectionManager::new().unwrap();
@@ -307,6 +381,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_socket_paths_unique() {
         let mgr = ConnectionManager::new().unwrap();
@@ -315,6 +390,7 @@ mod tests {
         assert_ne!(p1, p2);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_socket_paths_deterministic() {
         let mgr = ConnectionManager::new().unwrap();
