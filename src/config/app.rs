@@ -14,7 +14,7 @@ pub fn config_dir() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let base = dirs::config_dir().context("Cannot determine config directory")?;
-        return Ok(base.join("ssync"));
+        Ok(base.join("ssync"))
     }
 }
 

@@ -209,11 +209,8 @@ pub async fn scp_probe(host: &HostEntry, timeout_secs: u64, socket: Option<&Path
                 // Shell-aware cleanup (best-effort)
                 let rm_cmd = match host.shell {
                     ShellType::Sh => {
-                        if remote_path.starts_with("~/") {
-                            format!(
-                                "rm -f \"$HOME/{}\" 2>/dev/null; exit 0",
-                                &remote_path[2..]
-                            )
+                        if let Some(rest) = remote_path.strip_prefix("~/") {
+                            format!("rm -f \"$HOME/{}\" 2>/dev/null; exit 0", rest)
                         } else {
                             format!("rm -f '{}' 2>/dev/null; exit 0", remote_path)
                         }

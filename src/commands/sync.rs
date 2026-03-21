@@ -828,7 +828,7 @@ async fn collect_file_metadata(
                 }
                 ShellType::Cmd => {
                     // Windows Cmd: use PowerShell inline for epoch time and hash
-                    let escaped = path.replace('\'', "''").replace('"', "\"\"");
+                    let escaped = path.replace('\'', "''");
                     format!(
                         "powershell -NoProfile -Command \"\
                          $i=Get-Item '{p}' -ErrorAction SilentlyContinue; \
@@ -1379,11 +1379,11 @@ fn build_dir_expand_cmd(paths: &[String], recursive: bool, shell: ShellType) -> 
             let expanded: Vec<String> = paths
                 .iter()
                 .map(|p| {
-                    let p = p.replace('/', "\\");
+                    let p = p.replace('/', "\\").replace('"', "`\"");
                     format!("\"{}\"", p)
                 })
                 .collect();
-            let recurse_flag = if recursive { " -Recurse" } else { "" };
+            let recurse_flag= if recursive { " -Recurse" } else { "" };
             format!(
                 "powershell -NoProfile -Command \"\
                  foreach ($p in @({files})) {{ \
@@ -1539,13 +1539,13 @@ fn build_batch_metadata_cmd(paths: &[String], shell: ShellType) -> String {
             let expanded: Vec<String> = paths
                 .iter()
                 .map(|p| {
-                    let p = p.replace('/', "\\");
+                    let p = p.replace('/', "\\").replace('"', "`\"");
                     format!("\"{}\"", p)
                 })
                 .collect();
             format!(
                 "powershell -NoProfile -Command \"\
-                 foreach ($f in @({files})) {{ \
+                 foreach ($f in @({files})){{ \
                    '---FILE:' + $f; \
                    $i=Get-Item $f -ErrorAction SilentlyContinue; \
                    if ($i) {{ \

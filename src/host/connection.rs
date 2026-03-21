@@ -19,10 +19,14 @@ enum ConnectionMode {
 /// State of an SSH connection to a host.
 #[derive(Debug, Clone)]
 pub enum ConnectionState {
-    Connected { socket_path: PathBuf },
+    Connected {
+        socket_path: PathBuf,
+    },
     /// Host reachable but no persistent socket (Direct mode on Windows).
     DirectConnected,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// Manages SSH connections for connection reuse.
@@ -90,7 +94,12 @@ impl ConnectionManager {
                 } else {
                     check_connectivity(&host, timeout_secs).await
                 };
-                (host.name.clone(), host.ssh_host.clone(), socket_path, result)
+                (
+                    host.name.clone(),
+                    host.ssh_host.clone(),
+                    socket_path,
+                    result,
+                )
             }));
         }
 

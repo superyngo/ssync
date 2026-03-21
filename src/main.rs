@@ -15,26 +15,17 @@ use cli::{Cli, Commands};
 /// but it must be explicitly enabled.
 #[cfg(target_os = "windows")]
 fn enable_ansi_support() {
-    #[cfg(feature = "tui")]
-    {
-        // crossterm (already a dependency via TUI feature) handles ANSI automatically
-        // No need to do anything explicitly
+    use std::os::windows::io::AsRawHandle;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    extern "system" {
+        fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
     }
-    #[cfg(not(feature = "tui"))]
-    {
-        // Without TUI/crossterm, use raw Win32 API via FFI.
-        use std::os::windows::io::AsRawHandle;
-        const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-        extern "system" {
-            fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
-            fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
-        }
-        unsafe {
-            let handle = std::io::stdout().as_raw_handle() as *mut std::ffi::c_void;
-            let mut mode: u32 = 0;
-            if GetConsoleMode(handle, &mut mode) != 0 {
-                let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-            }
+    unsafe {
+        let handle = std::io::stdout().as_raw_handle();
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) != 0 {
+            let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         }
     }
 }
