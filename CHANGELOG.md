@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.4.0] - 2026-03-19
+## [v0.5.0] - 2026-03-21
+
+### Added
+- Dual-mode ConnectionManager (Pooled/Direct) for Windows client support
+- ANSI escape code support on Windows terminals via `SetConsoleMode`
+
+### Fixed
+- Shell-aware SCP probe paths for PowerShell and Cmd remote hosts
+- Windows Cmd remote shell support in sync commands (metadata, batch, dir-expand)
+- Defensive escaping and clippy/fmt fixes throughout
+
+## [v0.4.0]- 2026-03-19
 
 ### Added
 - SSH host key acceptance during init with interactive prompt

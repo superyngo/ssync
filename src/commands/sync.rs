@@ -1383,7 +1383,7 @@ fn build_dir_expand_cmd(paths: &[String], recursive: bool, shell: ShellType) -> 
                     format!("\"{}\"", p)
                 })
                 .collect();
-            let recurse_flag= if recursive { " -Recurse" } else { "" };
+            let recurse_flag = if recursive { " -Recurse" } else { "" };
             format!(
                 "powershell -NoProfile -Command \"\
                  foreach ($p in @({files})) {{ \
