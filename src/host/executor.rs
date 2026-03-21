@@ -188,33 +188,51 @@ pub async fn upload_pooled(
 }
 
 /// Probe whether scp works to a remote host by uploading a 1-byte temp file.
-/// Tries /tmp first, falls back to ~/ if /tmp is unavailable.
-/// Cleans up the probe file after testing.
+/// Uses shell-appropriate remote paths and cleanup commands.
 pub async fn scp_probe(host: &HostEntry, timeout_secs: u64, socket: Option<&Path>) -> Result<()> {
-    // Create a local 1-byte temp file
+    use crate::config::schema::ShellType;
+
     let temp_dir = tempfile::tempdir().context("Failed to create temp dir for scp probe")?;
     let local_probe = temp_dir.path().join("ssync_probe");
     std::fs::write(&local_probe, b"0").context("Failed to write probe file")?;
 
-    // Try /tmp first, then fallback to ~/
-    let probe_paths = ["/tmp/.ssync_probe", "~/.ssync_probe"];
+    // Tilde (~) is expanded by SCP/SFTP natively; env vars ($env:TEMP, %TEMP%) are NOT.
+    let probe_paths: Vec<&str> = match host.shell {
+        ShellType::Sh => vec!["/tmp/.ssync_probe", "~/.ssync_probe"],
+        ShellType::PowerShell | ShellType::Cmd => vec!["~/.ssync_probe"],
+    };
 
     let mut last_err = None;
     for remote_path in &probe_paths {
         match upload_pooled(host, &local_probe, remote_path, timeout_secs, socket).await {
             Ok(()) => {
-                // Clean up: remove the probe file via ssh (best-effort)
-                let rm_cmd = if *remote_path == "~/.ssync_probe" {
-                    "rm -f \"$HOME/.ssync_probe\" 2>/dev/null; exit 0".to_string()
-                } else {
-                    format!("rm -f '{}' 2>/dev/null; exit 0", remote_path)
+                // Shell-aware cleanup (best-effort)
+                let rm_cmd = match host.shell {
+                    ShellType::Sh => {
+                        if remote_path.starts_with("~/") {
+                            format!(
+                                "rm -f \"$HOME/{}\" 2>/dev/null; exit 0",
+                                &remote_path[2..]
+                            )
+                        } else {
+                            format!("rm -f '{}' 2>/dev/null; exit 0", remote_path)
+                        }
+                    }
+                    ShellType::PowerShell => {
+                        format!(
+                            "Remove-Item -Force '{}' -ErrorAction SilentlyContinue",
+                            remote_path
+                        )
+                    }
+                    ShellType::Cmd => {
+                        format!("del /f /q \"{}\" 2>nul", remote_path)
+                    }
                 };
                 let _ = run_remote_pooled(host, &rm_cmd, timeout_secs, socket).await;
                 return Ok(());
             }
             Err(e) => {
                 last_err = Some(e);
-                // If /tmp failed, try ~/
                 continue;
             }
         }
