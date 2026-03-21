@@ -10,8 +10,32 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
 
+/// Enable ANSI escape code support on Windows terminals.
+/// Modern Windows 10+ supports ANSI via Virtual Terminal Processing,
+/// but it must be explicitly enabled.
+#[cfg(target_os = "windows")]
+fn enable_ansi_support() {
+    use std::os::windows::io::AsRawHandle;
+    const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+    extern "system" {
+        fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
+    }
+    unsafe {
+        let handle = std::io::stdout().as_raw_handle();
+        let mut mode: u32 = 0;
+        if GetConsoleMode(handle, &mut mode) != 0 {
+            let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enable_ansi_support() {}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    enable_ansi_support();
     let cli = Cli::parse();
 
     // Initialize tracing
