@@ -810,7 +810,7 @@ async fn collect_file_metadata(
                         p = ps_path
                     )
                 }
-                ShellType::Sh | ShellType::Cmd => {
+                ShellType::Sh => {
                     // Handle ~ expansion: $HOME must stay unquoted for shell expansion
                     let escaped = if let Some(stripped) = path.strip_prefix("~/") {
                         format!("$HOME/'{}'", stripped.replace('\'', "'\\''"))
@@ -823,6 +823,19 @@ async fn collect_file_metadata(
                     format!(
                         "stat -c '%Y %s' {p} 2>/dev/null || stat -f '%m %z' {p} 2>/dev/null; \
                          (sha256sum {p} 2>/dev/null || shasum -a 256 {p} 2>/dev/null) || true",
+                        p = escaped
+                    )
+                }
+                ShellType::Cmd => {
+                    // Windows Cmd: use PowerShell inline for epoch time and hash
+                    let escaped = path.replace('\'', "''").replace('"', "\"\"");
+                    format!(
+                        "powershell -NoProfile -Command \"\
+                         $i=Get-Item '{p}' -ErrorAction SilentlyContinue; \
+                         if ($i) {{ \
+                           [int64](($i.LastWriteTimeUtc-[datetime]'1970-01-01').TotalSeconds), $i.Length -join ' '; \
+                           (Get-FileHash '{p}' -Algorithm SHA256).Hash.ToLower() \
+                         }}\"",
                         p = escaped
                     )
                 }
@@ -1055,6 +1068,51 @@ fn make_decisions_fixed_source(
     ))
 }
 
+/// Build a shell-appropriate mkdir command for creating parent directories.
+fn build_mkdir_cmd(shell: ShellType, parent: &str) -> Option<String> {
+    if parent.is_empty() {
+        return None;
+    }
+    match shell {
+        ShellType::Sh => {
+            if parent.starts_with("~/") || parent == "~" {
+                let sub = if parent == "~" { "" } else { &parent[2..] };
+                if sub.is_empty() {
+                    None
+                } else {
+                    Some(format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\"")))
+                }
+            } else if parent != "/" {
+                Some(format!("mkdir -p '{}'", parent.replace('\'', "'\\''")))
+            } else {
+                None
+            }
+        }
+        ShellType::PowerShell => {
+            if parent != "/" && parent != "\\" {
+                Some(format!(
+                    "New-Item -ItemType Directory -Force -Path '{}' | Out-Null",
+                    parent.replace('\'', "''")
+                ))
+            } else {
+                None
+            }
+        }
+        ShellType::Cmd => {
+            let win_parent = parent.replace('/', "\\");
+            // Skip root drives like "C:\" or "\"
+            if win_parent == "\\" || (win_parent.len() == 3 && win_parent.ends_with(":\\")) {
+                None
+            } else {
+                Some(format!(
+                    "if not exist \"{}\" mkdir \"{}\"",
+                    win_parent, win_parent
+                ))
+            }
+        }
+    }
+}
+
 /// Stage 3: Distribute file from source to targets via local relay.
 /// Returns (succeeded_hosts, failed_hosts_with_errors).
 async fn distribute(
@@ -1097,20 +1155,8 @@ async fn distribute(
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if !parent.is_empty() && parent != "/" && !parent.starts_with('~') {
-                let mkdir_cmd = format!("mkdir -p '{}'", parent.replace('\'', "'\\''"));
+            if let Some(mkdir_cmd) = build_mkdir_cmd(target.shell, &parent) {
                 let _ = executor::run_remote(&target, &mkdir_cmd, timeout).await;
-            } else if parent.starts_with("~/") || parent == "~" {
-                // Use $HOME expansion instead of literal '~'
-                let sub = if parent == "~" { "" } else { &parent[2..] };
-                let mkdir_cmd = if sub.is_empty() {
-                    String::new()
-                } else {
-                    format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\""))
-                };
-                if !mkdir_cmd.is_empty() {
-                    let _ = executor::run_remote(&target, &mkdir_cmd, timeout).await;
-                }
             }
 
             let result = executor::upload(&target, &local_temp, &remote_path, timeout).await;
@@ -1188,23 +1234,10 @@ async fn distribute_pooled(
                 .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if !parent.is_empty() && parent != "/" && !parent.starts_with('~') {
-                let mkdir_cmd = format!("mkdir -p '{}'", parent.replace('\'', "'\\''"));
+            if let Some(mkdir_cmd) = build_mkdir_cmd(target.shell, &parent) {
                 let _ =
                     executor::run_remote_pooled(&target, &mkdir_cmd, timeout, socket.as_deref())
                         .await;
-            } else if parent.starts_with("~/") || parent == "~" {
-                let sub = if parent == "~" { "" } else { &parent[2..] };
-                if !sub.is_empty() {
-                    let mkdir_cmd = format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\""));
-                    let _ = executor::run_remote_pooled(
-                        &target,
-                        &mkdir_cmd,
-                        timeout,
-                        socket.as_deref(),
-                    )
-                    .await;
-                }
             }
 
             let result = executor::upload_pooled(
@@ -1236,14 +1269,21 @@ async fn distribute_pooled(
 /// This handles the case where the shell expands `~/foo` → `/home/user/foo` before
 /// ssync receives it — remotes need the tilde form so it resolves to *their* home dir.
 fn to_tilde_path(path: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
+    // Check both HOME (Unix) and USERPROFILE (Windows)
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    if let Some(ref home) = home {
         if !home.is_empty() {
-            if path == home {
+            if path == home.as_str() {
                 return "~".to_string();
             }
-            let prefix = format!("{}/", home);
-            if let Some(rest) = path.strip_prefix(&prefix) {
-                return format!("~/{}", rest);
+            // Check both forward-slash and backslash separators
+            for sep in &["/", "\\"] {
+                let prefix = format!("{}{}", home, sep);
+                if let Some(rest) = path.strip_prefix(&prefix) {
+                    return format!("~/{}", rest);
+                }
             }
         }
     }
@@ -1305,7 +1345,7 @@ fn build_dir_expand_cmd(paths: &[String], recursive: bool, shell: ShellType) -> 
                 recurse = recurse_flag
             )
         }
-        ShellType::Sh | ShellType::Cmd => {
+        ShellType::Sh => {
             let expanded: Vec<String> = paths
                 .iter()
                 .map(|p| {
@@ -1333,6 +1373,29 @@ fn build_dir_expand_cmd(paths: &[String], recursive: bool, shell: ShellType) -> 
                  done",
                 files = expanded.join(" "),
                 depth = depth_flag
+            )
+        }
+        ShellType::Cmd => {
+            let expanded: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    let p = p.replace('/', "\\");
+                    format!("\"{}\"", p)
+                })
+                .collect();
+            let recurse_flag = if recursive { " -Recurse" } else { "" };
+            format!(
+                "powershell -NoProfile -Command \"\
+                 foreach ($p in @({files})) {{ \
+                   '---PATH:' + $p; \
+                   if (Test-Path $p -PathType Container) {{ \
+                     'DIR'; \
+                     Get-ChildItem $p -File{recurse} | ForEach-Object {{ $_.FullName }} \
+                   }} elseif (Test-Path $p) {{ 'FILE' }} \
+                   else {{ 'MISSING' }} \
+                 }}\"",
+                files = expanded.join(","),
+                recurse = recurse_flag
             )
         }
     }
@@ -1452,7 +1515,7 @@ fn build_batch_metadata_cmd(paths: &[String], shell: ShellType) -> String {
                 files = expanded.join(",")
             )
         }
-        ShellType::Sh | ShellType::Cmd => {
+        ShellType::Sh => {
             let expanded: Vec<String> = paths
                 .iter()
                 .map(|p| {
@@ -1470,6 +1533,27 @@ fn build_batch_metadata_cmd(paths: &[String], shell: ShellType) -> String {
                  (sha256sum \"$f\" 2>/dev/null || shasum -a 256 \"$f\" 2>/dev/null) || echo \"NOHASH\"; \
                  done",
                 files = expanded.join(" ")
+            )
+        }
+        ShellType::Cmd => {
+            let expanded: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    let p = p.replace('/', "\\");
+                    format!("\"{}\"", p)
+                })
+                .collect();
+            format!(
+                "powershell -NoProfile -Command \"\
+                 foreach ($f in @({files})) {{ \
+                   '---FILE:' + $f; \
+                   $i=Get-Item $f -ErrorAction SilentlyContinue; \
+                   if ($i) {{ \
+                     [int64](($i.LastWriteTimeUtc-[datetime]'1970-01-01').TotalSeconds), $i.Length -join ' '; \
+                     (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() \
+                   }} else {{ 'MISSING' }} \
+                 }}\"",
+                files = expanded.join(",")
             )
         }
     }
