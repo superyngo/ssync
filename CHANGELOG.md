@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.6.0] - 2026-04-14
+
+### Added
+- SshTransport trait definition with unified interface for SSH operations
+- RemoteOutput struct for structured command execution results
+- ProcessTransport implementation wrapping ConnectionManager with RwLock
+- async-trait dependency for async trait support
+
+### Changed
+- SSH abstraction layer (Phase 1) enabling future transport backends
+
+### Docs
+- SshTransport trait abstraction design spec
+- OpenSSH library migration evaluation
+- russh library migration evaluation
+- SSH transport trait implementation plan
+
+### Tests
+- ProcessTransport unit tests (send/sync, creation, initial state)
+
 ## [v0.5.0] - 2026-03-21
 
 ### Added
