@@ -1,0 +1,142 @@
+use std::path::Path;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use tokio::sync::RwLock;
+
+use crate::config::schema::HostEntry;
+use crate::host::connection::ConnectionManager;
+use crate::host::executor;
+use crate::host::transport::{RemoteOutput, SshTransport};
+
+/// SSH transport that shells out to system `ssh`/`scp` commands.
+///
+/// Wraps `ConnectionManager` for connection pooling (ControlMaster on Unix,
+/// direct on Windows) and delegates operations to `executor` functions.
+/// Internal state is protected by `tokio::sync::RwLock` so that concurrent
+/// `exec`/`upload`/`download` calls only take read locks while
+/// `connect`/`shutdown` take write locks without blocking the async runtime.
+pub struct ProcessTransport {
+    inner: RwLock<ConnectionManager>,
+}
+
+impl ProcessTransport {
+    /// Create a new ProcessTransport.
+    /// On Unix, allocates a temporary socket directory for ControlMaster pooling.
+    /// On Windows, uses direct (non-pooled) SSH connections.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: RwLock::new(ConnectionManager::new()?),
+        })
+    }
+}
+
+#[async_trait]
+impl SshTransport for ProcessTransport {
+    async fn connect(
+        &self,
+        hosts: &[&HostEntry],
+        timeout: Duration,
+        concurrency: usize,
+    ) -> Result<Vec<String>> {
+        let timeout_secs = timeout.as_secs();
+        let mut mgr = self.inner.write().await;
+        mgr.pre_check(hosts, timeout_secs, concurrency).await;
+        Ok(mgr.reachable_hosts())
+    }
+
+    async fn exec(
+        &self,
+        host: &HostEntry,
+        cmd: &str,
+        timeout: Duration,
+    ) -> Result<RemoteOutput> {
+        let timeout_secs = timeout.as_secs();
+        let socket_path = {
+            let mgr = self.inner.read().await;
+            mgr.socket_for(&host.name).map(|p| p.to_path_buf())
+        };
+        let out =
+            executor::run_remote_pooled(host, cmd, timeout_secs, socket_path.as_deref()).await?;
+        Ok(RemoteOutput {
+            stdout: out.stdout,
+            stderr: out.stderr,
+            exit_code: out.exit_code,
+            success: out.success,
+        })
+    }
+
+    async fn upload(
+        &self,
+        host: &HostEntry,
+        local: &Path,
+        remote: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let timeout_secs = timeout.as_secs();
+        let socket_path = {
+            let mgr = self.inner.read().await;
+            mgr.socket_for(&host.name).map(|p| p.to_path_buf())
+        };
+        executor::upload_pooled(host, local, remote, timeout_secs, socket_path.as_deref())
+            .await
+            .context("upload via ProcessTransport failed")
+    }
+
+    async fn download(
+        &self,
+        host: &HostEntry,
+        remote: &str,
+        local: &Path,
+        timeout: Duration,
+    ) -> Result<()> {
+        let timeout_secs = timeout.as_secs();
+        let socket_path = {
+            let mgr = self.inner.read().await;
+            mgr.socket_for(&host.name).map(|p| p.to_path_buf())
+        };
+        executor::download_pooled(host, remote, local, timeout_secs, socket_path.as_deref())
+            .await
+            .context("download via ProcessTransport failed")
+    }
+
+    async fn scp_probe(
+        &self,
+        hosts: &[&HostEntry],
+        timeout: Duration,
+        concurrency: usize,
+    ) -> Result<Vec<String>> {
+        let timeout_secs = timeout.as_secs();
+        let mut mgr = self.inner.write().await;
+        mgr.scp_probe(hosts, timeout_secs, concurrency).await;
+        Ok(mgr.scp_capable_hosts())
+    }
+
+    fn failed_hosts(&self) -> Vec<(String, String)> {
+        self.inner
+            .try_read()
+            .map(|mgr| mgr.failed_hosts())
+            .unwrap_or_default()
+    }
+
+    fn scp_failed_hosts(&self) -> Vec<(String, String)> {
+        self.inner
+            .try_read()
+            .map(|mgr| mgr.scp_failed_hosts())
+            .unwrap_or_default()
+    }
+
+    fn reachable_hosts(&self) -> Vec<String> {
+        self.inner
+            .try_read()
+            .map(|mgr| mgr.reachable_hosts())
+            .unwrap_or_default()
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        let mut mgr = self.inner.write().await;
+        mgr.shutdown().await;
+        Ok(())
+    }
+}
