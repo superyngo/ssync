@@ -146,3 +146,54 @@ impl SshTransport for ProcessTransport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_creates_transport() {
+        let transport = ProcessTransport::new();
+        assert!(transport.is_ok(), "ProcessTransport::new() should succeed");
+    }
+
+    #[test]
+    fn test_reachable_hosts_empty_initially() {
+        let transport = ProcessTransport::new().unwrap();
+        assert!(
+            transport.reachable_hosts().is_empty(),
+            "No hosts should be reachable before connect()"
+        );
+    }
+
+    #[test]
+    fn test_failed_hosts_empty_initially() {
+        let transport = ProcessTransport::new().unwrap();
+        assert!(
+            transport.failed_hosts().is_empty(),
+            "No hosts should be failed before connect()"
+        );
+    }
+
+    #[test]
+    fn test_scp_failed_hosts_empty_initially() {
+        let transport = ProcessTransport::new().unwrap();
+        assert!(
+            transport.scp_failed_hosts().is_empty(),
+            "No hosts should have failed SCP before scp_probe()"
+        );
+    }
+
+    #[test]
+    fn test_transport_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ProcessTransport>();
+    }
+
+    #[test]
+    fn test_trait_object_is_dyn_compatible() {
+        fn assert_dyn_compatible(_: &dyn SshTransport) {}
+        let transport = ProcessTransport::new().unwrap();
+        assert_dyn_compatible(&transport);
+    }
+}
