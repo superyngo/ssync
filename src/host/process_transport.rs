@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::sync::RwLock;
+use tracing::debug;
 
 use crate::config::schema::HostEntry;
 use crate::host::connection::ConnectionManager;
@@ -46,19 +47,15 @@ impl SshTransport for ProcessTransport {
         Ok(mgr.reachable_hosts())
     }
 
-    async fn exec(
-        &self,
-        host: &HostEntry,
-        cmd: &str,
-        timeout: Duration,
-    ) -> Result<RemoteOutput> {
+    async fn exec(&self, host: &HostEntry, cmd: &str, timeout: Duration) -> Result<RemoteOutput> {
         let timeout_secs = timeout.as_secs();
         let socket_path = {
             let mgr = self.inner.read().await;
             mgr.socket_for(&host.name).map(|p| p.to_path_buf())
         };
-        let out =
-            executor::run_remote_pooled(host, cmd, timeout_secs, socket_path.as_deref()).await?;
+        let out = executor::run_remote_pooled(host, cmd, timeout_secs, socket_path.as_deref())
+            .await
+            .context("exec via ProcessTransport failed")?;
         Ok(RemoteOutput {
             stdout: out.stdout,
             stderr: out.stderr,
@@ -114,24 +111,33 @@ impl SshTransport for ProcessTransport {
     }
 
     fn failed_hosts(&self) -> Vec<(String, String)> {
-        self.inner
-            .try_read()
-            .map(|mgr| mgr.failed_hosts())
-            .unwrap_or_default()
+        match self.inner.try_read() {
+            Ok(mgr) => mgr.failed_hosts(),
+            Err(_) => {
+                debug!("failed_hosts: could not acquire read lock, returning empty");
+                Vec::new()
+            }
+        }
     }
 
     fn scp_failed_hosts(&self) -> Vec<(String, String)> {
-        self.inner
-            .try_read()
-            .map(|mgr| mgr.scp_failed_hosts())
-            .unwrap_or_default()
+        match self.inner.try_read() {
+            Ok(mgr) => mgr.scp_failed_hosts(),
+            Err(_) => {
+                debug!("scp_failed_hosts: could not acquire read lock, returning empty");
+                Vec::new()
+            }
+        }
     }
 
     fn reachable_hosts(&self) -> Vec<String> {
-        self.inner
-            .try_read()
-            .map(|mgr| mgr.reachable_hosts())
-            .unwrap_or_default()
+        match self.inner.try_read() {
+            Ok(mgr) => mgr.reachable_hosts(),
+            Err(_) => {
+                debug!("reachable_hosts: could not acquire read lock, returning empty");
+                Vec::new()
+            }
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {

@@ -39,12 +39,7 @@ pub trait SshTransport: Send + Sync {
     ) -> Result<Vec<String>>;
 
     /// Execute a command on a remote host.
-    async fn exec(
-        &self,
-        host: &HostEntry,
-        cmd: &str,
-        timeout: Duration,
-    ) -> Result<RemoteOutput>;
+    async fn exec(&self, host: &HostEntry, cmd: &str, timeout: Duration) -> Result<RemoteOutput>;
 
     /// Upload a local file to a remote path.
     async fn upload(
