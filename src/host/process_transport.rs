@@ -18,10 +18,12 @@ use crate::host::transport::{RemoteOutput, SshTransport};
 /// Internal state is protected by `tokio::sync::RwLock` so that concurrent
 /// `exec`/`upload`/`download` calls only take read locks while
 /// `connect`/`shutdown` take write locks without blocking the async runtime.
+#[allow(dead_code)]
 pub struct ProcessTransport {
     inner: RwLock<ConnectionManager>,
 }
 
+#[allow(dead_code)]
 impl ProcessTransport {
     /// Create a new ProcessTransport.
     /// On Unix, allocates a temporary socket directory for ControlMaster pooling.

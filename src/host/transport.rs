@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use crate::config::schema::HostEntry;
 
 /// Result of a remote command execution.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RemoteOutput {
     pub stdout: String,
@@ -28,6 +29,7 @@ pub struct RemoteOutput {
 /// 4. Optionally call `scp_probe()` to verify SCP capability
 /// 5. Call `shutdown()` when done
 #[async_trait]
+#[allow(dead_code)]
 pub trait SshTransport: Send + Sync {
     /// Establish connections to a set of hosts.
     /// Returns names of successfully connected hosts.
