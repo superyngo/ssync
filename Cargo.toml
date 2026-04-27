@@ -45,6 +45,9 @@ crossterm = { version = "0.28", optional = true }
 # Cross-platform paths
 dirs = "5"
 
+# Current user info
+whoami = "1"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
