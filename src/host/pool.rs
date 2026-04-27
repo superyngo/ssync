@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -7,11 +8,15 @@ use crate::output::progress::SyncProgress;
 
 use super::concurrency::ConcurrencyLimiter;
 use super::connection::ConnectionManager;
+use super::session_pool::{RemoteOutput, RusshSessionPool};
 
 /// Shared SSH connection pool: wraps ConnectionManager + ConcurrencyLimiter + SyncProgress.
 /// Used by all SSH-using subcommands for consistent connection pooling, concurrency control,
 /// and progress display.
 pub struct SshPool {
+    /// russh-based sessions for exec operations
+    pub session_pool: Arc<RusshSessionPool>,
+    /// legacy ControlMaster pool — kept for sync.rs file transfers until Phase 3
     pub conn_mgr: ConnectionManager,
     pub limiter: ConcurrencyLimiter,
     pub progress: SyncProgress,
@@ -72,8 +77,19 @@ impl SshPool {
             progress.finish_host_check(connected, failed);
         }
 
+        // Establish russh sessions to all reachable hosts
+        let reachable_names: std::collections::HashSet<String> =
+            conn_mgr.reachable_hosts().into_iter().collect();
+        let reachable_entries: Vec<&HostEntry> =
+            hosts.iter().copied().filter(|h| reachable_names.contains(&h.name)).collect();
+
+        let session_pool = Arc::new(
+            RusshSessionPool::setup(&reachable_entries, timeout, global_concurrency).await?,
+        );
+
         Ok((
             Self {
+                session_pool,
                 conn_mgr,
                 limiter,
                 progress,
@@ -127,6 +143,9 @@ impl SshPool {
     pub async fn shutdown(mut self) {
         self.progress.clear();
         self.conn_mgr.shutdown().await;
+        if let Ok(pool) = Arc::try_unwrap(self.session_pool) {
+            pool.shutdown().await;
+        }
     }
 }
 
@@ -154,5 +173,20 @@ mod tests {
         };
         assert!(r.result.is_err());
         assert_eq!(r.host_name, "h2");
+    }
+
+    #[test]
+    fn test_pool_host_result_with_russh_output() {
+        let r: PoolHostResult<RemoteOutput> = PoolHostResult {
+            host_name: "h1".into(),
+            result: Ok(RemoteOutput {
+                stdout: "ok".into(),
+                stderr: String::new(),
+                exit_code: Some(0),
+                success: true,
+            }),
+            elapsed: std::time::Duration::from_millis(50),
+        };
+        assert!(r.result.is_ok());
     }
 }
