@@ -7,22 +7,44 @@ pub async fn detect_russh(
     timeout: u64,
 ) -> anyhow::Result<crate::config::schema::ShellType> {
     use crate::config::schema::ShellType;
-    // Try PowerShell first
+
+    let mut any_exec_ok = false;
+
+    // Try PowerShell
     if let Ok(o) = sessions
         .exec(&host.ssh_host, "$PSVersionTable.PSVersion.Major", timeout)
         .await
     {
+        any_exec_ok = true;
         if o.success && !o.stdout.trim().is_empty() {
             return Ok(ShellType::PowerShell);
         }
     }
-    // Check for Windows CMD via 'ver'
+
+    // Try CMD (Windows)
     if let Ok(o) = sessions.exec(&host.ssh_host, "ver", timeout).await {
+        any_exec_ok = true;
         if o.success && o.stdout.contains("Windows") {
             return Ok(ShellType::Cmd);
         }
     }
-    // Default: POSIX shell
+
+    // Confirm POSIX shell is reachable before defaulting
+    if let Ok(o) = sessions.exec(&host.ssh_host, "echo ok", timeout).await {
+        any_exec_ok = true;
+        if o.success {
+            return Ok(ShellType::Sh);
+        }
+    }
+
+    if !any_exec_ok {
+        anyhow::bail!(
+            "shell detection failed for {}: all exec attempts returned errors (session may be dropped)",
+            host.ssh_host
+        );
+    }
+
+    // exec succeeded but none of the markers matched — default to Sh
     Ok(ShellType::Sh)
 }
 
