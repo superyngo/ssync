@@ -6,9 +6,8 @@ use tokio::sync::Semaphore;
 
 use crate::config::schema::{ConflictStrategy, HostEntry, ShellType, SyncEntry};
 use crate::host::concurrency::ConcurrencyLimiter;
-use crate::host::connection::ConnectionManager;
-use crate::host::executor;
 use crate::host::pool::SshPool;
+use crate::host::session_pool::RusshSessionPool;
 use crate::output::printer;
 use crate::output::summary::SyncSummary;
 
@@ -106,19 +105,19 @@ pub async fn run(
         summary.add_host_failure(&name, &err);
     }
 
-    for (name, err) in pool.scp_failed_hosts() {
-        printer::print_host_line("scp-failed", "error", &format!("{}: {}", name, err));
-        summary.add_host_failure(&name, &format!("scp probe failed: {}", err));
+    for (name, err) in pool.sftp_failed_hosts() {
+        printer::print_host_line("sftp-failed", "error", &format!("{}: {}", name, err));
+        summary.add_host_failure(&name, &format!("sftp probe failed: {}", err));
     }
 
-    // Step 3: Filter to scp-capable hosts (excludes both unreachable and scp-failed)
+    // Step 3: Filter to sftp-capable hosts (excludes both unreachable and sftp-failed)
+    let reachable_hosts = pool.filter_sftp_capable(&hosts);
     if let Some(src) = cli_source {
-        if pool.socket_for(src).is_none() {
+        if !reachable_hosts.iter().any(|h| h.name == src) {
             pool.shutdown().await;
-            anyhow::bail!("Source host '{}' is unreachable", src);
+            anyhow::bail!("Source host '{}' is unreachable or SFTP-incapable", src);
         }
     }
-    let reachable_hosts = pool.filter_scp_capable(&hosts);
 
     if reachable_hosts.len() < 2 && !all_paths.is_empty() {
         println!(
@@ -160,7 +159,7 @@ pub async fn run(
                         paths_for_src,
                         false, // shallow for non-recursive entries
                         ctx.timeout,
-                        &pool.conn_mgr,
+                        &pool.session_pool,
                     )
                     .await
                     {
@@ -234,7 +233,7 @@ pub async fn run(
             &all_paths,
             ctx.timeout,
             ctx.concurrency(),
-            &pool.conn_mgr,
+            &pool.session_pool,
         )
         .await?;
         pool.progress.finish_collect();
@@ -343,7 +342,7 @@ pub async fn run(
                     decision,
                     ctx.timeout,
                     &pool.limiter,
-                    &pool.conn_mgr,
+                    &pool.session_pool,
                 )
                 .await
                 {
@@ -432,7 +431,7 @@ pub async fn run(
                     &entry.paths,
                     true, // deep recursive for recursive entries
                     ctx.timeout,
-                    &pool.conn_mgr,
+                    &pool.session_pool,
                 )
                 .await
                 {
@@ -483,6 +482,7 @@ pub async fn run(
                 dry_run,
                 push_missing,
                 *effective_source,
+                Arc::clone(&pool.session_pool),
                 &mut summary,
             )
             .await?;
@@ -625,10 +625,11 @@ async fn sync_path_across(
     dry_run: bool,
     push_missing: bool,
     source_override: Option<&str>,
+    sessions: Arc<RusshSessionPool>,
     summary: &mut SyncSummary,
 ) -> Result<()> {
     // Stage 1: Collect metadata from all hosts
-    let collect_result = collect_file_metadata(hosts, path, ctx.timeout, ctx.concurrency()).await?;
+    let collect_result = collect_file_metadata(hosts, path, ctx.timeout, ctx.concurrency(), Arc::clone(&sessions)).await?;
 
     if collect_result.found.is_empty() {
         if !collect_result.missing.is_empty() {
@@ -707,7 +708,7 @@ async fn sync_path_across(
         }
 
         // Stage 3: Distribute via local relay
-        match distribute(hosts, decision, ctx.timeout, ctx.concurrency()).await {
+        match distribute(hosts, decision, ctx.timeout, ctx.concurrency(), Arc::clone(&sessions)).await {
             Ok((succeeded, failed_uploads)) => {
                 if !succeeded.is_empty() {
                     printer::print_host_line("synced", "ok", &succeeded.join(", "));
@@ -778,6 +779,7 @@ async fn collect_file_metadata(
     path: &str,
     timeout: u64,
     concurrency: usize,
+    sessions: Arc<RusshSessionPool>,
 ) -> Result<CollectResult> {
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
@@ -786,6 +788,7 @@ async fn collect_file_metadata(
         let sem = semaphore.clone();
         let host = (*host).clone();
         let path = path.to_string();
+        let sessions = Arc::clone(&sessions);
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
 
@@ -841,7 +844,7 @@ async fn collect_file_metadata(
                 }
             };
 
-            match executor::run_remote(&host, &cmd, timeout).await {
+            match sessions.exec(&host.ssh_host, &cmd, timeout).await {
                 Ok(output) => {
                     // Command always exits 0 (hash uses || true).
                     // Parse first line for mtime+size; empty/unparseable means file missing.
@@ -1068,51 +1071,6 @@ fn make_decisions_fixed_source(
     ))
 }
 
-/// Build a shell-appropriate mkdir command for creating parent directories.
-fn build_mkdir_cmd(shell: ShellType, parent: &str) -> Option<String> {
-    if parent.is_empty() {
-        return None;
-    }
-    match shell {
-        ShellType::Sh => {
-            if parent.starts_with("~/") || parent == "~" {
-                let sub = if parent == "~" { "" } else { &parent[2..] };
-                if sub.is_empty() {
-                    None
-                } else {
-                    Some(format!("mkdir -p \"$HOME/{}\"", sub.replace('"', "\\\"")))
-                }
-            } else if parent != "/" {
-                Some(format!("mkdir -p '{}'", parent.replace('\'', "'\\''")))
-            } else {
-                None
-            }
-        }
-        ShellType::PowerShell => {
-            if parent != "/" && parent != "\\" {
-                Some(format!(
-                    "New-Item -ItemType Directory -Force -Path '{}' | Out-Null",
-                    parent.replace('\'', "''")
-                ))
-            } else {
-                None
-            }
-        }
-        ShellType::Cmd => {
-            let win_parent = parent.replace('/', "\\");
-            // Skip root drives like "C:\" or "\"
-            if win_parent == "\\" || (win_parent.len() == 3 && win_parent.ends_with(":\\")) {
-                None
-            } else {
-                Some(format!(
-                    "if not exist \"{}\" mkdir \"{}\"",
-                    win_parent, win_parent
-                ))
-            }
-        }
-    }
-}
-
 /// Stage 3: Distribute file from source to targets via local relay.
 /// Returns (succeeded_hosts, failed_hosts_with_errors).
 async fn distribute(
@@ -1120,6 +1078,7 @@ async fn distribute(
     decision: &SyncDecision,
     timeout: u64,
     concurrency: usize,
+    sessions: Arc<RusshSessionPool>,
 ) -> Result<(Vec<String>, Vec<(String, String)>)> {
     let source = hosts
         .iter()
@@ -1129,7 +1088,7 @@ async fn distribute(
     // Download to local temp file
     let temp_dir = tempfile::tempdir()?;
     let local_temp = temp_dir.path().join("ssync_relay");
-    executor::download(source, &decision.path, &local_temp, timeout).await?;
+    sessions.download(source, &decision.path, &local_temp, timeout).await?;
 
     // Upload to all targets in parallel
     let semaphore = Arc::new(Semaphore::new(concurrency));
@@ -1146,20 +1105,12 @@ async fn distribute(
         let local_temp = local_temp.clone();
         let remote_path = decision.path.clone();
         let target_name = target_name.clone();
+        let sessions = Arc::clone(&sessions);
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
 
-            // Ensure parent directory exists on target
-            let parent = std::path::Path::new(&remote_path)
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if let Some(mkdir_cmd) = build_mkdir_cmd(target.shell, &parent) {
-                let _ = executor::run_remote(&target, &mkdir_cmd, timeout).await;
-            }
-
-            let result = executor::upload(&target, &local_temp, &remote_path, timeout).await;
+            let result = sessions.upload(&target, &local_temp, &remote_path, timeout).await;
             (target_name, result)
         }));
     }
@@ -1178,13 +1129,13 @@ async fn distribute(
 }
 
 /// Stage 3 (Pooled): Distribute file from source to targets via local relay,
-/// using ControlMaster sockets and dual-level concurrency limiter.
+/// using SFTP sessions and dual-level concurrency limiter.
 async fn distribute_pooled(
     hosts: &[&HostEntry],
     decision: &SyncDecision,
     timeout: u64,
     limiter: &ConcurrencyLimiter,
-    conn_mgr: &ConnectionManager,
+    sessions: &Arc<RusshSessionPool>,
 ) -> Result<(Vec<String>, Vec<(String, String)>)> {
     let source = hosts
         .iter()
@@ -1194,11 +1145,9 @@ async fn distribute_pooled(
     // Download from source using pooled connection
     let temp_dir = tempfile::tempdir()?;
     let local_temp = temp_dir.path().join("ssync_relay");
-    let source_socket = conn_mgr.socket_for(&source.name);
     {
         let _permit = limiter.acquire(&source.name).await;
-        executor::download_pooled(source, &decision.path, &local_temp, timeout, source_socket)
-            .await?;
+        sessions.download(source, &decision.path, &local_temp, timeout).await?;
     }
 
     // Upload to all targets in parallel with concurrency limiter
@@ -1214,7 +1163,7 @@ async fn distribute_pooled(
         let local_temp = local_temp.clone();
         let remote_path = decision.path.clone();
         let target_name = target_name.clone();
-        let socket = conn_mgr.socket_for(&target.name).map(|p| p.to_path_buf());
+        let sessions = Arc::clone(sessions);
 
         // We need references to limiter, but can't move them into spawn.
         // Use Arc for the limiter's semaphores (they're already Arc internally).
@@ -1229,25 +1178,7 @@ async fn distribute_pooled(
             let _global_permit = limiter_global.acquire().await.unwrap();
             let _per_host_permit = limiter_per_host.acquire().await.unwrap();
 
-            // Ensure parent directory exists on target
-            let parent = std::path::Path::new(&remote_path)
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if let Some(mkdir_cmd) = build_mkdir_cmd(target.shell, &parent) {
-                let _ =
-                    executor::run_remote_pooled(&target, &mkdir_cmd, timeout, socket.as_deref())
-                        .await;
-            }
-
-            let result = executor::upload_pooled(
-                &target,
-                &local_temp,
-                &remote_path,
-                timeout,
-                socket.as_deref(),
-            )
-            .await;
+            let result = sessions.upload(&target, &local_temp, &remote_path, timeout).await;
             (target_name, result)
         }));
     }
@@ -1455,15 +1386,14 @@ async fn expand_directory_paths(
     paths: &[String],
     recursive: bool,
     timeout: u64,
-    conn_mgr: &ConnectionManager,
+    sessions: &Arc<RusshSessionPool>,
 ) -> Result<HashMap<String, DirExpandResult>> {
     if paths.is_empty() {
         return Ok(HashMap::new());
     }
 
     let cmd = build_dir_expand_cmd(paths, recursive, source_host.shell);
-    let socket = conn_mgr.socket_for(&source_host.name);
-    let output = executor::run_remote_pooled(source_host, &cmd, timeout, socket).await?;
+    let output = sessions.exec(&source_host.ssh_host, &cmd, timeout).await?;
 
     if !output.success {
         tracing::warn!(
@@ -1662,31 +1592,21 @@ async fn batch_collect_all_metadata(
     paths: &[String],
     timeout: u64,
     concurrency: usize,
-    conn_mgr: &ConnectionManager,
+    sessions: &Arc<RusshSessionPool>,
 ) -> Result<BatchCollectResult> {
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
 
-    let mut skipped_unreachable: Vec<String> = Vec::new();
-
     for host in hosts {
-        let socket = match conn_mgr.socket_for(&host.name) {
-            Some(s) => Some(s.to_path_buf()),
-            None => {
-                skipped_unreachable.push(host.name.clone());
-                continue;
-            }
-        };
-
         let sem = semaphore.clone();
         let host = (*host).clone();
         let paths = paths.to_vec();
         let cmd = build_batch_metadata_cmd(&paths, host.shell);
+        let sessions = Arc::clone(sessions);
 
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            let result = executor::run_remote_pooled(&host, &cmd, timeout, socket.as_deref()).await;
-
+            let result = sessions.exec(&host.ssh_host, &cmd, timeout).await;
             match result {
                 Ok(output) if output.success => {
                     let parsed = parse_batch_metadata_output(&output.stdout, &paths, &host.name);
@@ -1707,7 +1627,7 @@ async fn batch_collect_all_metadata(
             },
         );
     }
-    let mut unreachable_hosts = skipped_unreachable;
+    let mut unreachable_hosts: Vec<String> = Vec::new();
 
     for handle in handles {
         let (host_name, parsed_opt, is_unreachable) = handle.await?;
