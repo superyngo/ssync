@@ -18,7 +18,7 @@ fn partition_host_key_failures(
     let mut host_key_failures = Vec::new();
     let mut other_failures = Vec::new();
     for (name, err) in failures {
-        if err.contains("Host key verification failed") {
+        if err.contains("Unknown host key") || err.contains("Host key verification failed") {
             host_key_failures.push((name, err));
         } else {
             other_failures.push((name, err));
@@ -538,5 +538,42 @@ mod tests {
         let (hk, other) = partition_host_key_failures(failures);
         assert_eq!(hk.len(), 1);
         assert!(other.is_empty());
+    }
+
+    #[test]
+    fn test_partition_host_key_failures_unknown_host_key() {
+        let failures = vec![
+            (
+                "host-a".to_string(),
+                "Unknown host key for server.example.com".to_string(),
+            ),
+            ("host-b".to_string(), "Connection refused".to_string()),
+        ];
+        let (hk, other) = partition_host_key_failures(failures);
+        assert_eq!(hk.len(), 1);
+        assert_eq!(hk[0].0, "host-a");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].0, "host-b");
+    }
+
+    #[test]
+    fn test_partition_host_key_failures_both_error_strings() {
+        let failures = vec![
+            (
+                "host-a".to_string(),
+                "Unknown host key for server.example.com".to_string(),
+            ),
+            (
+                "host-b".to_string(),
+                "ControlMaster failed: Host key verification failed.".to_string(),
+            ),
+            ("host-c".to_string(), "Timeout".to_string()),
+        ];
+        let (hk, other) = partition_host_key_failures(failures);
+        assert_eq!(hk.len(), 2);
+        assert_eq!(hk[0].0, "host-a");
+        assert_eq!(hk[1].0, "host-b");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].0, "host-c");
     }
 }

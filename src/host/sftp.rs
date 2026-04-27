@@ -108,6 +108,18 @@ pub async fn download(
     tokio::time::timeout(timeout, async {
         let resolved = resolve_remote_path(remote_path, home_dir);
         let sftp = open_sftp(handle).await?;
+        if let Ok(attrs) = sftp.metadata(&resolved).await {
+            if let Some(size) = attrs.size {
+                if size > MAX_SFTP_FILE_SIZE {
+                    anyhow::bail!(
+                        "Remote file {} is too large ({} bytes > {} bytes limit)",
+                        resolved,
+                        size,
+                        MAX_SFTP_FILE_SIZE
+                    );
+                }
+            }
+        }
         let data = sftp
             .read(&resolved)
             .await

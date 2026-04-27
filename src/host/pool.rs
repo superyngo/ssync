@@ -100,7 +100,7 @@ impl SshPool {
             self.session_pool.reachable_hosts().into_iter().collect();
         hosts
             .iter()
-            .filter(|h| reachable.contains(&h.name))
+            .filter(|h| reachable.contains(&h.ssh_host))
             .copied()
             .collect()
     }
