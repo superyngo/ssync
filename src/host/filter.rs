@@ -38,18 +38,21 @@ mod tests {
                 ssh_host: "a".into(),
                 shell: ShellType::Sh,
                 groups: vec!["web".into()],
+                proxy_jump: None,
             },
             HostEntry {
                 name: "b".into(),
                 ssh_host: "b".into(),
                 shell: ShellType::PowerShell,
                 groups: vec!["db".into()],
+                proxy_jump: None,
             },
             HostEntry {
                 name: "c".into(),
                 ssh_host: "c".into(),
                 shell: ShellType::Sh,
                 groups: vec!["web".into()],
+                proxy_jump: None,
             },
         ]
     }

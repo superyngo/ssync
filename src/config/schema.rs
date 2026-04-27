@@ -95,6 +95,9 @@ pub struct HostEntry {
     pub shell: ShellType,
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Optional first-hop ProxyJump alias. None = direct connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_jump: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,5 +182,19 @@ mod tests {
         let toml_str = "max_per_host_concurrency = 8";
         let settings: Settings = toml::from_str(toml_str).unwrap();
         assert_eq!(settings.max_per_host_concurrency, 8);
+    }
+
+    #[test]
+    fn test_host_entry_proxy_jump_roundtrip() {
+        let entry = HostEntry {
+            name: "backend".to_string(),
+            ssh_host: "backend".to_string(),
+            shell: ShellType::Sh,
+            groups: vec![],
+            proxy_jump: Some("bastion".to_string()),
+        };
+        let toml_str = toml::to_string_pretty(&entry).unwrap();
+        let parsed: HostEntry = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.proxy_jump.as_deref(), Some("bastion"));
     }
 }

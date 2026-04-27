@@ -148,6 +148,7 @@ pub async fn detect_pooled(
         ssh_host: host_ssh.to_string(),
         shell: ShellType::Sh, // doesn't matter for detection
         groups: Vec::new(),
+        proxy_jump: None,
     };
 
     let mut ssh_connected = false;

@@ -281,6 +281,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
                 ssh_host: name.clone(),
                 shell: crate::config::schema::ShellType::Sh,
                 groups: Vec::new(),
+                proxy_jump: None,
             })
             .collect();
         let entry_refs: Vec<&HostEntry> = temp_entries.iter().collect();
@@ -352,6 +353,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
                                 ssh_host: name.clone(),
                                 shell: crate::config::schema::ShellType::Sh,
                                 groups: Vec::new(),
+                                proxy_jump: None,
                             })
                             .collect();
                         let retry_refs: Vec<&HostEntry> = retry_entries.iter().collect();
@@ -428,6 +430,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
                         ssh_host: host_name,
                         shell: shell_type,
                         groups: Vec::new(),
+                        proxy_jump: None,
                     });
                     summary.add_success();
                 }
