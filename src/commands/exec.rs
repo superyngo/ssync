@@ -93,6 +93,7 @@ pub async fn run(
         let host = (*host).clone();
         let script_path = script_path.to_path_buf();
         let timeout = ctx.timeout;
+        let sessions = pool.session_pool.clone();
         let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
         let global_sem = pool.limiter.global_semaphore();
 
@@ -100,7 +101,7 @@ pub async fn run(
             let _permit = global_sem.acquire_owned().await.unwrap();
             let start = Instant::now();
             let result =
-                exec_on_host_pooled(&host, &script_path, timeout, keep, sudo, socket.as_deref())
+                exec_on_host_pooled(&host, &script_path, timeout, keep, sudo, socket.as_deref(), sessions)
                     .await;
             let elapsed = start.elapsed();
             (host, result, elapsed)
@@ -149,8 +150,9 @@ async fn exec_on_host_pooled(
     keep: bool,
     sudo: bool,
     socket: Option<&Path>,
+    sessions: std::sync::Arc<crate::host::session_pool::RusshSessionPool>,
 ) -> Result<String> {
-    let temp_dir = get_expanded_temp_dir_pooled(host, timeout, socket).await?;
+    let temp_dir = get_expanded_temp_dir_pooled(host, timeout, sessions.clone()).await?;
     let script_name = script_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -183,8 +185,7 @@ async fn exec_on_host_pooled(
 
     // Make executable (sh only)
     if host.shell == ShellType::Sh {
-        executor::run_remote_pooled(host, &format!("chmod +x {}", remote_path), timeout, socket)
-            .await?;
+        sessions.exec(&host.ssh_host, &format!("chmod +x {}", remote_path), timeout).await?;
     }
 
     // Execute
@@ -200,7 +201,7 @@ async fn exec_on_host_pooled(
         exec_cmd
     };
 
-    let output = executor::run_remote_pooled(host, &exec_cmd, timeout, socket).await?;
+    let output = sessions.exec(&host.ssh_host, &exec_cmd, timeout).await?;
 
     // Cleanup (unless --keep)
     if !keep {
@@ -209,7 +210,7 @@ async fn exec_on_host_pooled(
             ShellType::PowerShell => format!("Remove-Item -Force {}", remote_path_quoted),
             ShellType::Cmd => format!("del /f \"{}\"", remote_path),
         };
-        let _ = executor::run_remote_pooled(host, &rm_cmd, timeout, socket).await;
+        let _ = sessions.exec(&host.ssh_host, &rm_cmd, timeout).await;
     }
 
     if output.success {
@@ -226,7 +227,7 @@ async fn exec_on_host_pooled(
 async fn get_expanded_temp_dir_pooled(
     host: &crate::config::schema::HostEntry,
     timeout: u64,
-    socket: Option<&Path>,
+    sessions: std::sync::Arc<crate::host::session_pool::RusshSessionPool>,
 ) -> Result<String> {
     let temp_dir = shell::temp_dir(host.shell);
 
@@ -242,7 +243,7 @@ async fn get_expanded_temp_dir_pooled(
         ShellType::Sh => unreachable!(),
     };
 
-    let output = executor::run_remote_pooled(host, &echo_cmd, timeout, socket).await?;
+    let output = sessions.exec(&host.ssh_host, &echo_cmd, timeout).await?;
 
     if !output.success {
         bail!("Failed to get temp directory: {}", output.stderr.trim());

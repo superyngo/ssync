@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::host::executor;
 use crate::host::pool::SshPool;
 use crate::host::shell;
 use crate::output::printer;
@@ -41,13 +40,13 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result
             command.to_string()
         };
         let timeout = ctx.timeout;
-        let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
+        let sessions = pool.session_pool.clone();
         let global_sem = pool.limiter.global_semaphore();
 
         handles.push(tokio::spawn(async move {
             let _permit = global_sem.acquire_owned().await.unwrap();
             let start = Instant::now();
-            let result = executor::run_remote_pooled(&host, &cmd, timeout, socket.as_deref()).await;
+            let result = sessions.exec(&host.ssh_host, &cmd, timeout).await;
             let elapsed = start.elapsed();
             (host, result, elapsed)
         }));

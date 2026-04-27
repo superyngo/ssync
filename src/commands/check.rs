@@ -70,7 +70,7 @@ pub async fn run(ctx: &Context) -> Result<()> {
         };
         let host = (*host).clone();
         let timeout = ctx.timeout;
-        let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
+        let sessions = pool.session_pool.clone();
         let global_sem = pool.limiter.global_semaphore();
 
         handles.push(tokio::spawn(async move {
@@ -81,7 +81,7 @@ pub async fn run(ctx: &Context) -> Result<()> {
                 &enabled,
                 &check_paths,
                 timeout,
-                socket.as_deref(),
+                sessions,
             )
             .await;
             let elapsed = start.elapsed();

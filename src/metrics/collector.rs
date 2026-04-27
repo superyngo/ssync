@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use anyhow::Result;
 use serde_json::Value;
 
@@ -109,7 +107,7 @@ pub async fn collect_pooled(
     enabled: &[String],
     check_paths: &[(String, String)], // (path, label)
     timeout_secs: u64,
-    socket: Option<&Path>,
+    sessions: std::sync::Arc<crate::host::session_pool::RusshSessionPool>,
 ) -> Result<CollectionResult> {
     let mut result = serde_json::Map::new();
     result.insert("schema_version".to_string(), Value::Number(1.into()));
@@ -122,7 +120,7 @@ pub async fn collect_pooled(
     if !enabled.is_empty() {
         let batch_cmd = probes::batch_command(host.shell, enabled);
         if !batch_cmd.is_empty() {
-            match executor::run_remote_pooled(host, &batch_cmd, timeout_secs, socket).await {
+            match sessions.exec(&host.ssh_host, &batch_cmd, timeout_secs).await {
                 Ok(output) if output.success => {
                     let parsed = super::parser::parse_batch(host.shell, enabled, &output.stdout);
                     for metric in enabled {
@@ -164,7 +162,7 @@ pub async fn collect_pooled(
     if !check_paths.is_empty() {
         let batch_cmd = probes::batch_path_command(host.shell, check_paths);
         if !batch_cmd.is_empty() {
-            match executor::run_remote_pooled(host, &batch_cmd, timeout_secs, socket).await {
+            match sessions.exec(&host.ssh_host, &batch_cmd, timeout_secs).await {
                 Ok(output) => {
                     let parsed =
                         super::parser::parse_batch_paths(host.shell, check_paths, &output.stdout);
