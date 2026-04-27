@@ -374,7 +374,9 @@ async fn connect_direct(
     cache: &mut PassphraseCache,
 ) -> Result<Handle<SshHandler>> {
     let russh_config = Arc::new(client::Config {
-        inactivity_timeout: Some(timeout),
+        // No inactivity_timeout: sessions must stay alive between setup and use.
+        // Per-operation timeouts are enforced by callers via tokio::time::timeout.
+        inactivity_timeout: None,
         ..<client::Config as Default>::default()
     });
 
@@ -453,7 +455,8 @@ async fn connect_via_proxy(
     });
 
     let russh_config = Arc::new(client::Config {
-        inactivity_timeout: Some(timeout),
+        // No inactivity_timeout: session must stay alive for the tunnel's lifetime.
+        inactivity_timeout: None,
         ..<client::Config as Default>::default()
     });
 
