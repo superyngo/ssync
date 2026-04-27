@@ -137,10 +137,8 @@ pub fn load_ssh_config() -> Result<ssh2_config::SshConfig> {
         .with_context(|| format!("Failed to parse {}", config_path.display()))
 }
 
-/// Resolve a host alias to its full connection parameters.
-/// Uses the ssh2-config crate for correct multi-alias and inheritance handling.
-pub fn resolve_host(alias: &str) -> Result<ResolvedHostConfig> {
-    let config = load_ssh_config()?;
+/// Resolve a host alias using a pre-loaded SshConfig (avoids re-parsing for bulk use).
+pub fn resolve_host_with_config(alias: &str, config: &ssh2_config::SshConfig) -> Result<ResolvedHostConfig> {
     let params = config.query(alias);
 
     let hostname = params
@@ -167,6 +165,9 @@ pub fn resolve_host(alias: &str) -> Result<ResolvedHostConfig> {
         .proxy_jump
         .and_then(|pj| pj.into_iter().next());
 
+    // TODO: ssh2-config does not expose IdentitiesOnly; revisit in Phase 2 auth chain
+    let identities_only = false;
+
     Ok(ResolvedHostConfig {
         alias: alias.to_string(),
         hostname,
@@ -174,8 +175,17 @@ pub fn resolve_host(alias: &str) -> Result<ResolvedHostConfig> {
         user,
         identity_files,
         proxy_jump,
-        identities_only: false,
+        identities_only,
     })
+}
+
+/// Resolve a host alias to its full connection parameters.
+/// Uses the ssh2-config crate for correct multi-alias and inheritance handling.
+/// For bulk use (multiple hosts), prefer loading config once with load_ssh_config()
+/// and calling resolve_host_with_config() in a loop.
+pub fn resolve_host(alias: &str) -> Result<ResolvedHostConfig> {
+    let config = load_ssh_config()?;
+    resolve_host_with_config(alias, &config)
 }
 
 /// Expand a leading `~` to the user's home directory.
