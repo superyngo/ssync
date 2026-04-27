@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.1] - 2026-04-28
+
+### Fixed
+- SFTP probe and upload now use `sftp.create()` instead of `sftp.write()` to correctly create non-existent files (russh-sftp `write()` opens with `WRITE` flag only, no `CREATE`)
+- Removed `inactivity_timeout` from russh client config; the timeout was killing idle sessions between `setup()` and subsequent `exec`/shell-detection calls, causing all shell detections to fail
+
 ## [v0.7.0] - 2026-04-27
 
 ### Added
