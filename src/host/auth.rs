@@ -88,8 +88,9 @@ async fn try_pubkey(
         }
     };
 
-    Ok(handle
+    let authed = handle
         .authenticate_publickey(user, Arc::new(key_pair))
         .await
-        .unwrap_or(false))
+        .context("Public key authentication error")?;
+    Ok(authed)
 }

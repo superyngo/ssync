@@ -90,6 +90,8 @@ pub struct RusshSessionPool {
     sessions: HashMap<String, Arc<Handle<SshHandler>>>,
     /// hosts that failed to connect: (alias, error message)
     failed: Vec<(String, String)>,
+    /// cancel senders for proxy keepalive tasks (one per proxied connection)
+    proxy_cancels: Vec<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl RusshSessionPool {
@@ -101,28 +103,34 @@ impl RusshSessionPool {
     ) -> Result<Self> {
         let timeout = Duration::from_secs(timeout_secs);
         let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let ssh_config = Arc::new(crate::config::ssh_config::load_ssh_config()?);
         let mut handles = Vec::new();
 
         for host in hosts {
             let alias = host.ssh_host.clone();
             let sem = sem.clone();
+            let config = ssh_config.clone();
 
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.unwrap();
                 let mut cache = PassphraseCache::new();
-                let result = connect_one(&alias, timeout, &mut cache).await;
+                let result = connect_one(&alias, timeout, &mut cache, &config).await;
                 (alias, result)
             }));
         }
 
         let mut sessions: HashMap<String, Arc<Handle<SshHandler>>> = HashMap::new();
         let mut failed: Vec<(String, String)> = Vec::new();
+        let mut proxy_cancels: Vec<tokio::sync::oneshot::Sender<()>> = Vec::new();
 
         for jh in handles {
             let (alias, result) = jh.await.context("task panic")?;
             match result {
-                Ok(handle) => {
+                Ok((handle, cancel_tx)) => {
                     sessions.insert(alias, Arc::new(handle));
+                    if let Some(tx) = cancel_tx {
+                        proxy_cancels.push(tx);
+                    }
                 }
                 Err(e) => {
                     failed.push((alias, e.to_string()));
@@ -130,7 +138,11 @@ impl RusshSessionPool {
             }
         }
 
-        Ok(Self { sessions, failed })
+        Ok(Self {
+            sessions,
+            failed,
+            proxy_cancels,
+        })
     }
 
     /// Names of hosts that failed to connect (with error messages).
@@ -161,6 +173,9 @@ impl RusshSessionPool {
 
     /// Close all sessions gracefully.
     pub async fn shutdown(self) {
+        for tx in self.proxy_cancels {
+            let _ = tx.send(());
+        }
         for (_, handle) in self.sessions {
             let _ = handle
                 .disconnect(russh::Disconnect::ByApplication, "", "en")
@@ -170,20 +185,27 @@ impl RusshSessionPool {
 }
 
 /// Open and authenticate a single session to `alias`.
-/// Resolves the alias via ~/.ssh/config and handles a single ProxyJump hop.
+/// Resolves the alias via the provided SshConfig and handles a single ProxyJump hop.
 async fn connect_one(
     alias: &str,
     timeout: Duration,
     cache: &mut PassphraseCache,
-) -> Result<Handle<SshHandler>> {
-    let resolved = crate::config::ssh_config::resolve_host(alias)?;
+    ssh_config: &ssh2_config::SshConfig,
+) -> Result<(Handle<SshHandler>, Option<tokio::sync::oneshot::Sender<()>>)> {
+    let resolved = crate::config::ssh_config::resolve_host_with_config(alias, ssh_config)?;
 
     match &resolved.proxy_jump.clone() {
         Some(proxy_alias) => {
-            let proxy_resolved = crate::config::ssh_config::resolve_host(proxy_alias)?;
-            connect_via_proxy(&proxy_resolved, &resolved, timeout, cache).await
+            let proxy_resolved =
+                crate::config::ssh_config::resolve_host_with_config(proxy_alias, ssh_config)?;
+            let (handle, cancel_tx) =
+                connect_via_proxy(&proxy_resolved, &resolved, timeout, cache).await?;
+            Ok((handle, Some(cancel_tx)))
         }
-        None => connect_direct(&resolved, timeout, cache).await,
+        None => {
+            let handle = connect_direct(&resolved, timeout, cache).await?;
+            Ok((handle, None))
+        }
     }
 }
 
@@ -242,7 +264,7 @@ async fn connect_via_proxy(
     target: &ResolvedHostConfig,
     timeout: Duration,
     cache: &mut PassphraseCache,
-) -> Result<Handle<SshHandler>> {
+) -> Result<(Handle<SshHandler>, tokio::sync::oneshot::Sender<()>)> {
     // Step 1: connect and authenticate to the proxy
     let proxy_handle = connect_direct(proxy, timeout, cache)
         .await
@@ -268,11 +290,14 @@ async fn connect_via_proxy(
     })?;
 
     // Step 3: establish a second SSH session over the channel stream.
-    // The proxy_handle is kept alive in a background task so the tunnel stays open.
+    // The proxy_handle is kept alive in a background task until cancelled or 24h.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         let _keep_alive = proxy_handle;
-        // Wait until the channel stream signals EOF (proxy connection dropped)
-        tokio::time::sleep(Duration::from_secs(86400)).await;
+        tokio::select! {
+            _ = cancel_rx => {}
+            _ = tokio::time::sleep(Duration::from_secs(86400)) => {}
+        }
     });
 
     let russh_config = Arc::new(client::Config {
@@ -308,7 +333,7 @@ async fn connect_via_proxy(
         )
     })?;
 
-    Ok(target_handle)
+    Ok((target_handle, cancel_tx))
 }
 
 /// Execute a command on an open session handle and collect stdout/stderr/exit code.
@@ -317,44 +342,45 @@ pub async fn exec_on_handle(
     cmd: &str,
     timeout: Duration,
 ) -> Result<RemoteOutput> {
-    let mut channel = tokio::time::timeout(timeout, handle.channel_open_session())
-        .await
-        .context("Channel open timeout")?
-        .context("Failed to open SSH channel")?;
+    tokio::time::timeout(timeout, async {
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .context("Failed to open SSH channel")?;
 
-    channel
-        .exec(true, cmd)
-        .await
-        .context("Failed to exec command")?;
+        channel.exec(true, cmd).await.context("Failed to exec command")?;
 
-    let mut stdout: Vec<u8> = Vec::new();
-    let mut stderr: Vec<u8> = Vec::new();
-    let mut exit_code: Option<u32> = None;
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut exit_code: Option<u32> = None;
 
-    loop {
-        match channel.wait().await {
-            Some(russh::ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
-            Some(russh::ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
-                stderr.extend_from_slice(&data);
+        loop {
+            match channel.wait().await {
+                Some(russh::ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                Some(russh::ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
+                    stderr.extend_from_slice(&data);
+                }
+                Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                    exit_code = Some(exit_status);
+                }
+                Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) => {}
+                None => break,
+                _ => {}
             }
-            Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
-                exit_code = Some(exit_status);
-            }
-            Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) => {}
-            None => break,
-            _ => {}
         }
-    }
 
-    let exit_code = exit_code.map(|c| c as i32);
-    let success = exit_code.map_or(false, |c| c == 0);
+        let exit_code = exit_code.map(|c| c as i32);
+        let success = exit_code.map_or(false, |c| c == 0);
 
-    Ok(RemoteOutput {
-        stdout: String::from_utf8_lossy(&stdout).to_string(),
-        stderr: String::from_utf8_lossy(&stderr).to_string(),
-        exit_code,
-        success,
+        Ok::<RemoteOutput, anyhow::Error>(RemoteOutput {
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
+            exit_code,
+            success,
+        })
     })
+    .await
+    .context("Command execution timeout")?
 }
 
 #[cfg(test)]
