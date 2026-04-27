@@ -35,11 +35,15 @@ pub async fn remote_home_dir(
     Ok(out.stdout.trim().to_string())
 }
 
+/// Maximum file size for in-memory SFTP transfer (64 MB).
+const MAX_SFTP_FILE_SIZE: u64 = 64 * 1024 * 1024;
+
 /// Open an SFTP session on the given SSH handle.
-async fn open_sftp(handle: &Handle<SshHandler>, timeout: Duration) -> Result<SftpSession> {
-    let channel = tokio::time::timeout(timeout, handle.channel_open_session())
+/// Callers are responsible for wrapping this in a timeout.
+async fn open_sftp(handle: &Handle<SshHandler>) -> Result<SftpSession> {
+    let channel = handle
+        .channel_open_session()
         .await
-        .context("SFTP channel open timeout")?
         .context("Failed to open SFTP channel")?;
 
     channel
@@ -61,24 +65,35 @@ pub async fn upload(
     home_dir: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let resolved = resolve_remote_path(remote_path, home_dir);
-    let sftp = open_sftp(handle, timeout).await?;
-
-    let local_data = tokio::fs::read(local_path)
-        .await
-        .with_context(|| format!("Failed to read {}", local_path.display()))?;
-
-    if let Some(parent) = std::path::Path::new(&resolved).parent() {
-        if parent != std::path::Path::new("") {
-            mkdir_p_sftp(&sftp, parent).await?;
+    tokio::time::timeout(timeout, async {
+        let resolved = resolve_remote_path(remote_path, home_dir);
+        let metadata = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("Cannot stat {}", local_path.display()))?;
+        if metadata.len() > MAX_SFTP_FILE_SIZE {
+            anyhow::bail!(
+                "File {} is too large for SFTP transfer ({} > {} bytes). Chunked transfer not yet implemented.",
+                local_path.display(),
+                metadata.len(),
+                MAX_SFTP_FILE_SIZE
+            );
         }
-    }
-
-    sftp.write(&resolved, &local_data)
-        .await
-        .with_context(|| format!("SFTP write failed for {}", resolved))?;
-
-    Ok(())
+        let sftp = open_sftp(handle).await?;
+        let local_data = tokio::fs::read(local_path)
+            .await
+            .with_context(|| format!("Failed to read {}", local_path.display()))?;
+        if let Some(parent) = std::path::Path::new(&resolved).parent() {
+            if parent != std::path::Path::new("") {
+                mkdir_p_sftp(&sftp, parent).await?;
+            }
+        }
+        sftp.write(&resolved, &local_data)
+            .await
+            .with_context(|| format!("SFTP upload failed for {}", resolved))?;
+        Ok(())
+    })
+    .await
+    .context("SFTP upload timed out")?
 }
 
 /// Download a remote file to a local path via SFTP.
@@ -90,22 +105,31 @@ pub async fn download(
     home_dir: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let resolved = resolve_remote_path(remote_path, home_dir);
-    let sftp = open_sftp(handle, timeout).await?;
-
-    let data = sftp
-        .read(&resolved)
-        .await
-        .with_context(|| format!("SFTP read failed for {}", resolved))?;
-
-    if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(local_path, &data)
-        .await
-        .with_context(|| format!("Failed to write {}", local_path.display()))?;
-
-    Ok(())
+    tokio::time::timeout(timeout, async {
+        let resolved = resolve_remote_path(remote_path, home_dir);
+        let sftp = open_sftp(handle).await?;
+        let data = sftp
+            .read(&resolved)
+            .await
+            .with_context(|| format!("SFTP download failed for {}", resolved))?;
+        if data.len() as u64 > MAX_SFTP_FILE_SIZE {
+            anyhow::bail!(
+                "Remote file {} is too large ({} > {} bytes). Chunked transfer not yet implemented.",
+                resolved,
+                data.len(),
+                MAX_SFTP_FILE_SIZE
+            );
+        }
+        if let Some(parent) = local_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(local_path, &data)
+            .await
+            .with_context(|| format!("Failed to write {}", local_path.display()))?;
+        Ok(())
+    })
+    .await
+    .context("SFTP download timed out")?
 }
 
 /// Recursively create directories on the remote (best-effort; ignores already-exists errors).
@@ -136,17 +160,19 @@ pub async fn sftp_probe(
     home_dir: &str,
     timeout: Duration,
 ) -> Result<()> {
-    let probe_path = format!("{}/.ssync_probe", home_dir);
-    let sftp = open_sftp(handle, timeout).await?;
-
-    sftp.write(&probe_path, b"0")
-        .await
-        .context("SFTP probe write failed")?;
-
-    // best-effort cleanup
-    let _ = sftp.remove_file(&probe_path).await;
-
-    Ok(())
+    tokio::time::timeout(timeout, async {
+        let probe_path = format!("{}/.ssync_probe", home_dir);
+        let sftp = open_sftp(handle).await?;
+        sftp.write(&probe_path, b"0")
+            .await
+            .context("SFTP probe write failed")?;
+        if let Err(e) = sftp.remove_file(&probe_path).await {
+            tracing::debug!("SFTP probe cleanup failed for {}: {}", probe_path, e);
+        }
+        Ok(())
+    })
+    .await
+    .context("SFTP probe timed out")?
 }
 
 #[cfg(test)]

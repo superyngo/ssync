@@ -261,32 +261,36 @@ impl RusshSessionPool {
         hosts: &[&crate::config::schema::HostEntry],
         timeout_secs: u64,
     ) {
-        for host in hosts {
-            if let Some(handle) = self.sessions.get(&host.ssh_host) {
-                let handle = handle.clone();
-                match self
-                    .home_dir(
-                        &host.ssh_host,
-                        host.shell,
-                        Duration::from_secs(timeout_secs),
-                    )
-                    .await
-                {
+        let timeout = Duration::from_secs(timeout_secs);
+
+        let tasks: Vec<_> = hosts
+            .iter()
+            .filter_map(|host| {
+                self.sessions.get(&host.ssh_host).map(|h| {
+                    (host.ssh_host.clone(), host.shell, Arc::clone(h))
+                })
+            })
+            .collect();
+
+        let mut set = tokio::task::JoinSet::new();
+        for (ssh_host, shell, handle) in tasks {
+            set.spawn(async move {
+                let home = crate::host::sftp::remote_home_dir(&handle, shell, timeout).await;
+                match home {
+                    Err(e) => Some((ssh_host, format!("home dir: {}", e))),
                     Ok(home) => {
-                        if let Err(e) = crate::host::sftp::sftp_probe(
-                            &handle,
-                            &home,
-                            Duration::from_secs(timeout_secs),
-                        )
-                        .await
-                        {
-                            self.sftp_failed.push((host.name.clone(), e.to_string()));
+                        match crate::host::sftp::sftp_probe(&handle, &home, timeout).await {
+                            Ok(()) => None,
+                            Err(e) => Some((ssh_host, e.to_string())),
                         }
                     }
-                    Err(e) => {
-                        self.sftp_failed.push((host.name.clone(), e.to_string()));
-                    }
                 }
+            });
+        }
+
+        while let Some(result) = set.join_next().await {
+            if let Ok(Some(failure)) = result {
+                self.sftp_failed.push(failure);
             }
         }
     }

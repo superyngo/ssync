@@ -157,7 +157,7 @@ impl SshPool {
         let capable = self.session_pool.sftp_capable_hosts();
         hosts
             .iter()
-            .filter(|h| capable.contains(&h.name))
+            .filter(|h| capable.contains(&h.ssh_host))
             .copied()
             .collect()
     }
