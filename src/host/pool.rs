@@ -15,7 +15,7 @@ use super::session_pool::{RemoteOutput, RusshSessionPool};
 /// and progress display.
 pub struct SshPool {
     /// russh-based sessions for exec operations
-    pub session_pool: Arc<RusshSessionPool>,
+    pub(crate) session_pool: Arc<RusshSessionPool>,
     /// legacy ControlMaster pool — kept for sync.rs file transfers until Phase 3
     pub conn_mgr: ConnectionManager,
     pub limiter: ConcurrencyLimiter,
@@ -87,6 +87,7 @@ impl SshPool {
             RusshSessionPool::setup(&reachable_entries, timeout, global_concurrency).await?,
         );
 
+        let russh_connected = session_pool.reachable_hosts().len();
         Ok((
             Self {
                 session_pool,
@@ -94,7 +95,7 @@ impl SshPool {
                 limiter,
                 progress,
             },
-            connected,
+            russh_connected,
         ))
     }
 
@@ -143,8 +144,15 @@ impl SshPool {
     pub async fn shutdown(mut self) {
         self.progress.clear();
         self.conn_mgr.shutdown().await;
-        if let Ok(pool) = Arc::try_unwrap(self.session_pool) {
-            pool.shutdown().await;
+        match Arc::try_unwrap(self.session_pool) {
+            Ok(pool) => pool.shutdown().await,
+            Err(arc) => {
+                tracing::warn!(
+                    "session_pool has {} strong references at shutdown; \
+                     sessions may not be cleanly closed",
+                    Arc::strong_count(&arc)
+                );
+            }
         }
     }
 }
