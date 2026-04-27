@@ -277,11 +277,11 @@ impl RusshSessionPool {
             set.spawn(async move {
                 let home = crate::host::sftp::remote_home_dir(&handle, shell, timeout).await;
                 match home {
-                    Err(e) => Some((ssh_host, format!("home dir: {}", e))),
-                    Ok(home) => {
-                        match crate::host::sftp::sftp_probe(&handle, &home, timeout).await {
-                            Ok(()) => None,
-                            Err(e) => Some((ssh_host, e.to_string())),
+                    Err(e) => (ssh_host, None, Some(format!("home dir: {}", e))),
+                    Ok(home_dir) => {
+                        match crate::host::sftp::sftp_probe(&handle, &home_dir, timeout).await {
+                            Ok(()) => (ssh_host, Some(home_dir), None),
+                            Err(e) => (ssh_host, Some(home_dir), Some(e.to_string())),
                         }
                     }
                 }
@@ -289,8 +289,18 @@ impl RusshSessionPool {
         }
 
         while let Some(result) = set.join_next().await {
-            if let Ok(Some(failure)) = result {
-                self.sftp_failed.push(failure);
+            match result {
+                Ok((ssh_host, home_dir, failure)) => {
+                    if let Some(home) = home_dir {
+                        self.home_dirs.lock().await.insert(ssh_host.clone(), home);
+                    }
+                    if let Some(err) = failure {
+                        self.sftp_failed.push((ssh_host, err));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("SFTP probe task panicked: {}", e);
+                }
             }
         }
     }
