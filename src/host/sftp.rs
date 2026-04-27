@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use russh::client::Handle;
 use russh_sftp::client::SftpSession;
+use tokio::io::AsyncWriteExt;
 
 use super::session_pool::SshHandler;
 use crate::config::schema::ShellType;
@@ -87,9 +88,12 @@ pub async fn upload(
                 mkdir_p_sftp(&sftp, parent).await?;
             }
         }
-        sftp.write(&resolved, &local_data)
+        sftp.create(&resolved)
             .await
-            .with_context(|| format!("SFTP upload failed for {}", resolved))?;
+            .with_context(|| format!("SFTP upload open failed for {}", resolved))?
+            .write_all(&local_data)
+            .await
+            .with_context(|| format!("SFTP upload write failed for {}", resolved))?;
         Ok(())
     })
     .await
@@ -175,7 +179,10 @@ pub async fn sftp_probe(
     tokio::time::timeout(timeout, async {
         let probe_path = format!("{}/.ssync_probe", home_dir);
         let sftp = open_sftp(handle).await?;
-        sftp.write(&probe_path, b"0")
+        sftp.create(&probe_path)
+            .await
+            .context("SFTP probe create failed")?
+            .write_all(b"0")
             .await
             .context("SFTP probe write failed")?;
         if let Err(e) = sftp.remove_file(&probe_path).await {
