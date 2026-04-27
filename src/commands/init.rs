@@ -29,44 +29,23 @@ fn partition_host_key_failures(
 
 /// Resolve the actual hostname and port for an SSH alias using `ssh -G`.
 /// Returns (hostname, port). Falls back to (alias, "22") on failure.
-async fn resolve_ssh_host_port(alias: &str) -> (String, String) {
-    let output = tokio::process::Command::new("ssh")
-        .arg("-G")
-        .arg(alias)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await;
-
-    let mut hostname = alias.to_string();
-    let mut port = "22".to_string();
-
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("hostname ") {
-                hostname = val.trim().to_string();
-            } else if let Some(val) = line.strip_prefix("port ") {
-                port = val.trim().to_string();
-            }
-        }
-    }
-
-    (hostname, port)
+/// Resolve SSH hostname and port for a host alias using ~/.ssh/config.
+async fn resolve_ssh_host_port(alias: &str) -> Result<(String, u16)> {
+    let resolved = crate::config::ssh_config::resolve_host(alias)?;
+    Ok((resolved.hostname, resolved.port))
 }
 
 /// Run ssh-keyscan for a single host and return the output lines (key entries).
 /// Returns Ok(output) on success, Err on failure or empty output.
 async fn keyscan_host(alias: &str, timeout_secs: u64) -> Result<String> {
-    let (hostname, port) = resolve_ssh_host_port(alias).await;
+    let (hostname, port) = resolve_ssh_host_port(alias).await?;
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
         tokio::process::Command::new("ssh-keyscan")
             .arg("-H")
             .arg("-p")
-            .arg(&port)
+            .arg(port.to_string())
             .arg(&hostname)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -529,6 +508,15 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_host_falls_back_to_alias() {
+        // An alias not in ~/.ssh/config should return alias as hostname, port 22
+        let result = crate::config::ssh_config::resolve_host("nonexistent-test-host-xyz");
+        let resolved = result.unwrap();
+        assert_eq!(resolved.hostname, "nonexistent-test-host-xyz");
+        assert_eq!(resolved.port, 22);
+    }
 
     #[test]
     fn test_partition_host_key_failures_mixed() {
