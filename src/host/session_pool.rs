@@ -290,14 +290,11 @@ async fn connect_via_proxy(
     })?;
 
     // Step 3: establish a second SSH session over the channel stream.
-    // The proxy_handle is kept alive in a background task until cancelled or 24h.
+    // Keep proxy_handle alive in a background task until shutdown() cancels it.
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         let _keep_alive = proxy_handle;
-        tokio::select! {
-            _ = cancel_rx => {}
-            _ = tokio::time::sleep(Duration::from_secs(86400)) => {}
-        }
+        let _ = cancel_rx.await;
     });
 
     let russh_config = Arc::new(client::Config {
