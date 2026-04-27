@@ -7,9 +7,9 @@ use anyhow::{bail, Context, Result};
 use russh::client::{self, Handle};
 use russh_keys::key::PublicKey;
 
+use super::auth::{authenticate, PassphraseCache};
 use crate::config::schema::HostEntry;
 use crate::config::ssh_config::ResolvedHostConfig;
-use super::auth::{authenticate, PassphraseCache};
 
 /// russh client handler: verifies server host keys against ~/.ssh/known_hosts.
 pub struct SshHandler {
@@ -217,7 +217,11 @@ impl RusshSessionPool {
             .ok_or_else(|| anyhow::anyhow!("Host '{}' not connected", host.ssh_host))?
             .clone();
         let home = self
-            .home_dir(&host.ssh_host, host.shell, Duration::from_secs(timeout_secs))
+            .home_dir(
+                &host.ssh_host,
+                host.shell,
+                Duration::from_secs(timeout_secs),
+            )
             .await?;
         crate::host::sftp::upload(
             &handle,
@@ -243,7 +247,11 @@ impl RusshSessionPool {
             .ok_or_else(|| anyhow::anyhow!("Host '{}' not connected", host.ssh_host))?
             .clone();
         let home = self
-            .home_dir(&host.ssh_host, host.shell, Duration::from_secs(timeout_secs))
+            .home_dir(
+                &host.ssh_host,
+                host.shell,
+                Duration::from_secs(timeout_secs),
+            )
             .await?;
         crate::host::sftp::download(
             &handle,
@@ -266,9 +274,9 @@ impl RusshSessionPool {
         let tasks: Vec<_> = hosts
             .iter()
             .filter_map(|host| {
-                self.sessions.get(&host.ssh_host).map(|h| {
-                    (host.ssh_host.clone(), host.shell, Arc::clone(h))
-                })
+                self.sessions
+                    .get(&host.ssh_host)
+                    .map(|h| (host.ssh_host.clone(), host.shell, Arc::clone(h)))
             })
             .collect();
 
@@ -382,13 +390,10 @@ async fn connect_direct(
         .next()
         .with_context(|| format!("No address resolved for {}", addr))?;
 
-    let mut handle =
-        tokio::time::timeout(timeout, client::connect(russh_config, addr, handler))
-            .await
-            .context("SSH connect timeout")?
-            .with_context(|| {
-                format!("Failed to connect to {}:{}", config.hostname, config.port)
-            })?;
+    let mut handle = tokio::time::timeout(timeout, client::connect(russh_config, addr, handler))
+        .await
+        .context("SSH connect timeout")?
+        .with_context(|| format!("Failed to connect to {}:{}", config.hostname, config.port))?;
 
     authenticate(
         &mut handle,
@@ -495,7 +500,10 @@ pub async fn exec_on_handle(
             .await
             .context("Failed to open SSH channel")?;
 
-        channel.exec(true, cmd).await.context("Failed to exec command")?;
+        channel
+            .exec(true, cmd)
+            .await
+            .context("Failed to exec command")?;
 
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();

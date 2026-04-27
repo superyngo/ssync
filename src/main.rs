@@ -49,15 +49,10 @@ fn init_tracing(verbose: bool) {
         EnvFilter::new("debug")
     } else {
         // Suppress VirtualLock warnings and other russh diagnostic noise.
-        EnvFilter::new(
-            "russh=error,russh_keys=error,ssh_key=error,zeroize=error,info",
-        )
+        EnvFilter::new("russh=error,russh_keys=error,ssh_key=error,zeroize=error,info")
     };
 
-    fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    fmt().with_env_filter(filter).with_target(false).init();
 }
 
 #[tokio::main]

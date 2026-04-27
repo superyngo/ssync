@@ -103,7 +103,11 @@ impl SshPool {
     pub fn filter_reachable<'a>(&self, hosts: &[&'a HostEntry]) -> Vec<&'a HostEntry> {
         let reachable: std::collections::HashSet<String> =
             self.session_pool.reachable_hosts().into_iter().collect();
-        hosts.iter().filter(|h| reachable.contains(&h.name)).copied().collect()
+        hosts
+            .iter()
+            .filter(|h| reachable.contains(&h.name))
+            .copied()
+            .collect()
     }
 
     /// Get names and errors of hosts that failed the SFTP probe.
@@ -139,8 +143,8 @@ impl SshPool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::session_pool::RemoteOutput;
+    use super::*;
 
     #[test]
     fn test_pool_host_result_struct() {

@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 
 use crate::config::schema::HostEntry;
 use crate::config::ssh_config;
-use crate::host::connection::ConnectionManager;
+use crate::host::session_pool::RusshSessionPool;
 use crate::host::shell;
 use crate::output::printer;
 use crate::output::progress::SyncProgress;
@@ -252,7 +252,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
             detect_hosts.len()
         );
 
-        // Build temp HostEntry list for ConnectionManager pre-check
+        // Build temp HostEntry list for session pool setup
         let temp_entries: Vec<HostEntry> = detect_hosts
             .iter()
             .map(|name| HostEntry {
@@ -265,20 +265,17 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
             .collect();
         let entry_refs: Vec<&HostEntry> = temp_entries.iter().collect();
 
-        // Pre-check connectivity via ControlMaster
-        let mut conn_mgr = ConnectionManager::new()?;
         let mut progress = SyncProgress::new();
-
         progress.start_host_check(entry_refs.len());
-        let connected = conn_mgr
-            .pre_check(&entry_refs, ctx.timeout, ctx.concurrency())
-            .await;
+        let session_pool =
+            RusshSessionPool::setup(&entry_refs, ctx.timeout, ctx.concurrency()).await?;
+        let connected = session_pool.reachable_hosts().len();
         let failed_count = entry_refs.len() - connected;
         progress.finish_host_check(connected, failed_count);
 
         // Partition failures: host key errors vs other errors
         let (host_key_failures, other_failures) =
-            partition_host_key_failures(conn_mgr.failed_hosts());
+            partition_host_key_failures(session_pool.failed_hosts());
 
         // Report non-host-key errors immediately
         for (name, err) in &other_failures {
@@ -287,7 +284,7 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
         }
 
         // Handle host key verification failures
-        let mut retry_conn_mgr: Option<ConnectionManager> = None;
+        let mut retry_pool: Option<RusshSessionPool> = None;
         if !host_key_failures.is_empty() {
             if dry_run {
                 for (name, _err) in &host_key_failures {
@@ -337,22 +334,22 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
                             .collect();
                         let retry_refs: Vec<&HostEntry> = retry_entries.iter().collect();
 
-                        let mut retry_cm = ConnectionManager::new()?;
                         println!("\nRetrying {} host(s)...", accepted.len());
                         progress.start_host_check(retry_refs.len());
-                        let retry_connected = retry_cm
-                            .pre_check(&retry_refs, ctx.timeout, ctx.concurrency())
-                            .await;
+                        let rp =
+                            RusshSessionPool::setup(&retry_refs, ctx.timeout, ctx.concurrency())
+                                .await?;
+                        let retry_connected = rp.reachable_hosts().len();
                         let retry_failed = retry_refs.len() - retry_connected;
                         progress.finish_host_check(retry_connected, retry_failed);
 
                         // Report retry failures
-                        for (name, err) in retry_cm.failed_hosts() {
+                        for (name, err) in rp.failed_hosts() {
                             printer::print_host_line(&name, "error", &err);
                             summary.add_failure(&name, &err);
                         }
 
-                        retry_conn_mgr = Some(retry_cm);
+                        retry_pool = Some(rp);
                     }
                 } else {
                     // User declined — report as errors
@@ -364,49 +361,34 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
             }
         }
 
-        // Detect shell type on reachable hosts using pooled connections
-        // Merge reachable hosts from both connection managers
-        let mut reachable = conn_mgr.reachable_hosts();
-        if let Some(ref rcm) = retry_conn_mgr {
-            reachable.extend(rcm.reachable_hosts());
-        }
-        let global_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(ctx.concurrency()));
-
-        let mut handles = Vec::new();
-        for host_name in &reachable {
-            let sem = global_sem.clone();
-            let host_name = host_name.clone();
-            let timeout = ctx.timeout;
-            let socket = conn_mgr
-                .socket_for(&host_name)
-                .or_else(|| {
-                    retry_conn_mgr
-                        .as_ref()
-                        .and_then(|rcm| rcm.socket_for(&host_name))
-                })
-                .map(|p| p.to_path_buf());
-
-            handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let shell_result =
-                    shell::detect_pooled(&host_name, timeout, socket.as_deref()).await;
-                (host_name, shell_result)
-            }));
+        // Detect shell type on reachable hosts using russh sessions
+        let mut reachable = session_pool.reachable_hosts();
+        if let Some(ref rp) = retry_pool {
+            reachable.extend(rp.reachable_hosts());
         }
 
         let mut new_hosts: Vec<HostEntry> = Vec::new();
-        for handle in handles {
-            let (host_name, shell_result) = handle.await?;
-            match shell_result {
+        for host_name in &reachable {
+            let host_entry = HostEntry {
+                name: host_name.clone(),
+                ssh_host: host_name.clone(),
+                shell: crate::config::schema::ShellType::Sh,
+                groups: Vec::new(),
+                proxy_jump: None,
+            };
+            let pool_ref = if session_pool.reachable_hosts().contains(host_name) {
+                &session_pool
+            } else if let Some(ref rp) = retry_pool {
+                rp
+            } else {
+                continue;
+            };
+            match shell::detect_russh(&host_entry, pool_ref, ctx.timeout).await {
                 Ok(shell_type) => {
-                    printer::print_host_line(
-                        &host_name,
-                        "ok",
-                        &format!("detected: {}", shell_type),
-                    );
+                    printer::print_host_line(host_name, "ok", &format!("detected: {}", shell_type));
                     new_hosts.push(HostEntry {
                         name: host_name.clone(),
-                        ssh_host: host_name,
+                        ssh_host: host_name.clone(),
                         shell: shell_type,
                         groups: Vec::new(),
                         proxy_jump: None,
@@ -414,15 +396,15 @@ pub async fn run(ctx: &Context, update: bool, dry_run: bool, skip: Vec<String>) 
                     summary.add_success();
                 }
                 Err(e) => {
-                    printer::print_host_line(&host_name, "error", &format!("{}", e));
-                    summary.add_failure(&host_name, &e.to_string());
+                    printer::print_host_line(host_name, "error", &format!("{}", e));
+                    summary.add_failure(host_name, &e.to_string());
                 }
             }
         }
 
-        conn_mgr.shutdown().await;
-        if let Some(mut rcm) = retry_conn_mgr {
-            rcm.shutdown().await;
+        session_pool.shutdown().await;
+        if let Some(rp) = retry_pool {
+            rp.shutdown().await;
         }
         progress.clear();
         summary.print();

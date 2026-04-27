@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 
 use crate::config::schema::ShellType;
 use crate::host::pool::SshPool;
-use crate::host::{executor, shell};
+use crate::host::shell;
 use crate::output::printer;
 use crate::output::summary::Summary;
 
@@ -94,15 +94,13 @@ pub async fn run(
         let script_path = script_path.to_path_buf();
         let timeout = ctx.timeout;
         let sessions = pool.session_pool.clone();
-        let socket = pool.socket_for(&host.name).map(|p| p.to_path_buf());
         let global_sem = pool.limiter.global_semaphore();
 
         handles.push(tokio::spawn(async move {
             let _permit = global_sem.acquire_owned().await.unwrap();
             let start = Instant::now();
             let result =
-                exec_on_host_pooled(&host, &script_path, timeout, keep, sudo, socket.as_deref(), sessions)
-                    .await;
+                exec_on_host_pooled(&host, &script_path, timeout, keep, sudo, sessions).await;
             let elapsed = start.elapsed();
             (host, result, elapsed)
         }));
@@ -149,7 +147,6 @@ async fn exec_on_host_pooled(
     timeout: u64,
     keep: bool,
     sudo: bool,
-    socket: Option<&Path>,
     sessions: std::sync::Arc<crate::host::session_pool::RusshSessionPool>,
 ) -> Result<String> {
     let temp_dir = get_expanded_temp_dir_pooled(host, timeout, sessions.clone()).await?;
@@ -163,17 +160,19 @@ async fn exec_on_host_pooled(
     // Upload — for Sh shells, try /tmp first then fall back to ~/ (like scp_probe)
     let remote_path = if host.shell == ShellType::Sh {
         let primary = format!("{}/{}", temp_dir, suffix);
-        match executor::upload_pooled(host, script_path, &primary, timeout, socket).await {
+        match sessions.upload(host, script_path, &primary, timeout).await {
             Ok(()) => primary,
             Err(_) => {
                 let fallback = format!("~/{}", suffix);
-                executor::upload_pooled(host, script_path, &fallback, timeout, socket).await?;
+                sessions
+                    .upload(host, script_path, &fallback, timeout)
+                    .await?;
                 fallback
             }
         }
     } else {
         let path = format!("{}/{}", temp_dir, suffix);
-        executor::upload_pooled(host, script_path, &path, timeout, socket).await?;
+        sessions.upload(host, script_path, &path, timeout).await?;
         path
     };
 
@@ -185,7 +184,13 @@ async fn exec_on_host_pooled(
 
     // Make executable (sh only)
     if host.shell == ShellType::Sh {
-        sessions.exec(&host.ssh_host, &format!("chmod +x {}", remote_path), timeout).await?;
+        sessions
+            .exec(
+                &host.ssh_host,
+                &format!("chmod +x {}", remote_path),
+                timeout,
+            )
+            .await?;
     }
 
     // Execute

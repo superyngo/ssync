@@ -90,7 +90,15 @@ fn parse_ssh_config_content(content: &str) -> Result<Vec<SshHostEntry>> {
 
         match key.to_lowercase().as_str() {
             "host" => {
-                flush_block(&mut hosts, &pending_names, &hostname, &user, port, &identity_file, &proxy_jump);
+                flush_block(
+                    &mut hosts,
+                    &pending_names,
+                    &hostname,
+                    &user,
+                    port,
+                    &identity_file,
+                    &proxy_jump,
+                );
                 pending_names = value.split_whitespace().map(|s| s.to_string()).collect();
                 hostname = None;
                 user = None;
@@ -111,7 +119,15 @@ fn parse_ssh_config_content(content: &str) -> Result<Vec<SshHostEntry>> {
         }
     }
 
-    flush_block(&mut hosts, &pending_names, &hostname, &user, port, &identity_file, &proxy_jump);
+    flush_block(
+        &mut hosts,
+        &pending_names,
+        &hostname,
+        &user,
+        port,
+        &identity_file,
+        &proxy_jump,
+    );
     Ok(hosts)
 }
 
@@ -138,21 +154,17 @@ pub fn load_ssh_config() -> Result<ssh2_config::SshConfig> {
 }
 
 /// Resolve a host alias using a pre-loaded SshConfig (avoids re-parsing for bulk use).
-pub fn resolve_host_with_config(alias: &str, config: &ssh2_config::SshConfig) -> Result<ResolvedHostConfig> {
+pub fn resolve_host_with_config(
+    alias: &str,
+    config: &ssh2_config::SshConfig,
+) -> Result<ResolvedHostConfig> {
     let params = config.query(alias);
 
-    let hostname = params
-        .host_name
-        .as_deref()
-        .unwrap_or(alias)
-        .to_string();
+    let hostname = params.host_name.as_deref().unwrap_or(alias).to_string();
 
     let port = params.port.unwrap_or(22);
 
-    let user = params
-        .user
-        .clone()
-        .unwrap_or_else(whoami::username);
+    let user = params.user.clone().unwrap_or_else(whoami::username);
 
     let identity_files: Vec<std::path::PathBuf> = params
         .identity_file
@@ -161,9 +173,7 @@ pub fn resolve_host_with_config(alias: &str, config: &ssh2_config::SshConfig) ->
         .map(|p| expand_tilde(&p))
         .collect();
 
-    let proxy_jump = params
-        .proxy_jump
-        .and_then(|pj| pj.into_iter().next());
+    let proxy_jump = params.proxy_jump.and_then(|pj| pj.into_iter().next());
 
     // TODO: ssh2-config does not expose IdentitiesOnly; revisit in Phase 2 auth chain
     let identities_only = false;

@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 
-use crate::config::schema::ShellType;
 use super::session_pool::SshHandler;
+use crate::config::schema::ShellType;
 
 /// Resolve a remote path, expanding a leading `~` using the provided home directory.
 pub fn resolve_remote_path(remote: &str, home_dir: &str) -> String {
@@ -197,9 +197,6 @@ mod tests {
 
     #[test]
     fn test_resolve_path_tilde_only() {
-        assert_eq!(
-            resolve_remote_path("~", "/home/alice"),
-            "/home/alice"
-        );
+        assert_eq!(resolve_remote_path("~", "/home/alice"), "/home/alice");
     }
 }

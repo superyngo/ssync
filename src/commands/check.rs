@@ -76,14 +76,8 @@ pub async fn run(ctx: &Context) -> Result<()> {
         handles.push(tokio::spawn(async move {
             let _permit = global_sem.acquire_owned().await.unwrap();
             let start = Instant::now();
-            let result = collector::collect_pooled(
-                &host,
-                &enabled,
-                &check_paths,
-                timeout,
-                sessions,
-            )
-            .await;
+            let result =
+                collector::collect_pooled(&host, &enabled, &check_paths, timeout, sessions).await;
             let elapsed = start.elapsed();
             (host, result, elapsed)
         }));

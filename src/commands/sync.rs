@@ -629,7 +629,14 @@ async fn sync_path_across(
     summary: &mut SyncSummary,
 ) -> Result<()> {
     // Stage 1: Collect metadata from all hosts
-    let collect_result = collect_file_metadata(hosts, path, ctx.timeout, ctx.concurrency(), Arc::clone(&sessions)).await?;
+    let collect_result = collect_file_metadata(
+        hosts,
+        path,
+        ctx.timeout,
+        ctx.concurrency(),
+        Arc::clone(&sessions),
+    )
+    .await?;
 
     if collect_result.found.is_empty() {
         if !collect_result.missing.is_empty() {
@@ -708,7 +715,15 @@ async fn sync_path_across(
         }
 
         // Stage 3: Distribute via local relay
-        match distribute(hosts, decision, ctx.timeout, ctx.concurrency(), Arc::clone(&sessions)).await {
+        match distribute(
+            hosts,
+            decision,
+            ctx.timeout,
+            ctx.concurrency(),
+            Arc::clone(&sessions),
+        )
+        .await
+        {
             Ok((succeeded, failed_uploads)) => {
                 if !succeeded.is_empty() {
                     printer::print_host_line("synced", "ok", &succeeded.join(", "));
@@ -1088,7 +1103,9 @@ async fn distribute(
     // Download to local temp file
     let temp_dir = tempfile::tempdir()?;
     let local_temp = temp_dir.path().join("ssync_relay");
-    sessions.download(source, &decision.path, &local_temp, timeout).await?;
+    sessions
+        .download(source, &decision.path, &local_temp, timeout)
+        .await?;
 
     // Upload to all targets in parallel
     let semaphore = Arc::new(Semaphore::new(concurrency));
@@ -1110,7 +1127,9 @@ async fn distribute(
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
 
-            let result = sessions.upload(&target, &local_temp, &remote_path, timeout).await;
+            let result = sessions
+                .upload(&target, &local_temp, &remote_path, timeout)
+                .await;
             (target_name, result)
         }));
     }
@@ -1147,7 +1166,9 @@ async fn distribute_pooled(
     let local_temp = temp_dir.path().join("ssync_relay");
     {
         let _permit = limiter.acquire(&source.name).await;
-        sessions.download(source, &decision.path, &local_temp, timeout).await?;
+        sessions
+            .download(source, &decision.path, &local_temp, timeout)
+            .await?;
     }
 
     // Upload to all targets in parallel with concurrency limiter
@@ -1178,7 +1199,9 @@ async fn distribute_pooled(
             let _global_permit = limiter_global.acquire().await.unwrap();
             let _per_host_permit = limiter_per_host.acquire().await.unwrap();
 
-            let result = sessions.upload(&target, &local_temp, &remote_path, timeout).await;
+            let result = sessions
+                .upload(&target, &local_temp, &remote_path, timeout)
+                .await;
             (target_name, result)
         }));
     }
