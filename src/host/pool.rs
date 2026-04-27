@@ -83,11 +83,6 @@ impl SshPool {
         ))
     }
 
-    /// ControlMaster sockets are no longer used; always returns None.
-    pub fn socket_for(&self, _host_name: &str) -> Option<&std::path::Path> {
-        None
-    }
-
     /// Get names of all reachable hosts.
     #[allow(dead_code)]
     pub fn reachable_hosts(&self) -> Vec<String> {
