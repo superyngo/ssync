@@ -33,22 +33,40 @@ fn enable_ansi_support() {
 #[cfg(not(target_os = "windows"))]
 fn enable_ansi_support() {}
 
+/// Initialize tracing subscriber with appropriate log level filtering.
+///
+/// If RUST_LOG is set, respect it entirely. Otherwise apply defaults:
+/// - Verbose mode: DEBUG level to see all logs
+/// - Normal mode: INFO level with suppressed russh/zeroize noise (VirtualLock warnings)
+fn init_tracing(verbose: bool) {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    // If RUST_LOG is set, respect it entirely.
+    // Otherwise apply our defaults: suppress russh/zeroize noise unless verbose.
+    let filter = if std::env::var("RUST_LOG").is_ok() {
+        EnvFilter::from_default_env()
+    } else if verbose {
+        EnvFilter::new("debug")
+    } else {
+        // Suppress VirtualLock warnings and other russh diagnostic noise.
+        EnvFilter::new(
+            "russh=error,russh_keys=error,ssh_key=error,zeroize=error,info",
+        )
+    };
+
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     enable_ansi_support();
     let cli = Cli::parse();
 
     // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive(if cli.verbose {
-                tracing::Level::DEBUG.into()
-            } else {
-                tracing::Level::INFO.into()
-            }),
-        )
-        .with_target(false)
-        .init();
+    init_tracing(cli.verbose);
 
     let cfg = cli.config.as_deref();
 
@@ -123,5 +141,14 @@ async fn main() -> Result<()> {
             let ctx = commands::Context::new_without_targets(cli.verbose, cfg, None).await?;
             commands::log::run(&ctx, last, since, host, action, errors).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_tracing_filter_builds() {
+        use tracing_subscriber::EnvFilter;
+        let _ = EnvFilter::new("russh=error,russh_keys=error,ssh_key=error,zeroize=error,info");
     }
 }
