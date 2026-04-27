@@ -90,6 +90,10 @@ pub struct RusshSessionPool {
     sessions: HashMap<String, Arc<Handle<SshHandler>>>,
     /// hosts that failed to connect: (alias, error message)
     failed: Vec<(String, String)>,
+    /// hosts that failed the SFTP probe: (name, error message)
+    sftp_failed: Vec<(String, String)>,
+    /// cached remote home directories: host alias → home path
+    home_dirs: tokio::sync::Mutex<HashMap<String, String>>,
     /// cancel senders for proxy keepalive tasks (one per proxied connection)
     proxy_cancels: Vec<tokio::sync::oneshot::Sender<()>>,
 }
@@ -141,6 +145,8 @@ impl RusshSessionPool {
         Ok(Self {
             sessions,
             failed,
+            sftp_failed: Vec::new(),
+            home_dirs: tokio::sync::Mutex::new(HashMap::new()),
             proxy_cancels,
         })
     }
@@ -169,6 +175,136 @@ impl RusshSessionPool {
             .clone();
 
         exec_on_handle(&handle, cmd, Duration::from_secs(timeout_secs)).await
+    }
+
+    /// Get the remote home directory for a host, caching the result.
+    async fn home_dir(
+        &self,
+        host_alias: &str,
+        shell: crate::config::schema::ShellType,
+        timeout: Duration,
+    ) -> Result<String> {
+        {
+            let cache = self.home_dirs.lock().await;
+            if let Some(home) = cache.get(host_alias) {
+                return Ok(home.clone());
+            }
+        }
+        let handle = self
+            .sessions
+            .get(host_alias)
+            .ok_or_else(|| anyhow::anyhow!("Host '{}' not connected", host_alias))?
+            .clone();
+        let home = crate::host::sftp::remote_home_dir(&handle, shell, timeout).await?;
+        self.home_dirs
+            .lock()
+            .await
+            .insert(host_alias.to_string(), home.clone());
+        Ok(home)
+    }
+
+    /// Upload a local file to a remote host via SFTP.
+    pub async fn upload(
+        &self,
+        host: &crate::config::schema::HostEntry,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        timeout_secs: u64,
+    ) -> Result<()> {
+        let handle = self
+            .sessions
+            .get(&host.ssh_host)
+            .ok_or_else(|| anyhow::anyhow!("Host '{}' not connected", host.ssh_host))?
+            .clone();
+        let home = self
+            .home_dir(&host.ssh_host, host.shell, Duration::from_secs(timeout_secs))
+            .await?;
+        crate::host::sftp::upload(
+            &handle,
+            local_path,
+            remote_path,
+            &home,
+            Duration::from_secs(timeout_secs),
+        )
+        .await
+    }
+
+    /// Download a remote file via SFTP.
+    pub async fn download(
+        &self,
+        host: &crate::config::schema::HostEntry,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        timeout_secs: u64,
+    ) -> Result<()> {
+        let handle = self
+            .sessions
+            .get(&host.ssh_host)
+            .ok_or_else(|| anyhow::anyhow!("Host '{}' not connected", host.ssh_host))?
+            .clone();
+        let home = self
+            .home_dir(&host.ssh_host, host.shell, Duration::from_secs(timeout_secs))
+            .await?;
+        crate::host::sftp::download(
+            &handle,
+            remote_path,
+            local_path,
+            &home,
+            Duration::from_secs(timeout_secs),
+        )
+        .await
+    }
+
+    /// Run SFTP probe on all connected hosts. Records failures in `sftp_failed`.
+    pub async fn run_sftp_probe(
+        &mut self,
+        hosts: &[&crate::config::schema::HostEntry],
+        timeout_secs: u64,
+    ) {
+        for host in hosts {
+            if let Some(handle) = self.sessions.get(&host.ssh_host) {
+                let handle = handle.clone();
+                match self
+                    .home_dir(
+                        &host.ssh_host,
+                        host.shell,
+                        Duration::from_secs(timeout_secs),
+                    )
+                    .await
+                {
+                    Ok(home) => {
+                        if let Err(e) = crate::host::sftp::sftp_probe(
+                            &handle,
+                            &home,
+                            Duration::from_secs(timeout_secs),
+                        )
+                        .await
+                        {
+                            self.sftp_failed.push((host.name.clone(), e.to_string()));
+                        }
+                    }
+                    Err(e) => {
+                        self.sftp_failed.push((host.name.clone(), e.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Names and errors of hosts that failed the SFTP probe.
+    pub fn sftp_failed_hosts(&self) -> Vec<(String, String)> {
+        self.sftp_failed.clone()
+    }
+
+    /// Hosts that passed the SFTP probe (by session key / alias).
+    pub fn sftp_capable_hosts(&self) -> Vec<String> {
+        let failed: std::collections::HashSet<&str> =
+            self.sftp_failed.iter().map(|(n, _)| n.as_str()).collect();
+        self.sessions
+            .keys()
+            .filter(|n| !failed.contains(n.as_str()))
+            .cloned()
+            .collect()
     }
 
     /// Close all sessions gracefully.

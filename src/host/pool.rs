@@ -66,16 +66,9 @@ impl SshPool {
         let mut progress = SyncProgress::new();
 
         progress.start_host_check(hosts.len());
-        let connected = conn_mgr.pre_check(hosts, timeout, global_concurrency).await;
+        let _connected = conn_mgr.pre_check(hosts, timeout, global_concurrency).await;
 
-        if probe_scp && connected > 0 {
-            let _scp_passed = conn_mgr.scp_probe(hosts, timeout, global_concurrency).await;
-            let effective_ok = connected - conn_mgr.scp_failed_hosts().len();
-            progress.finish_host_check(effective_ok, hosts.len() - effective_ok);
-        } else {
-            let failed = hosts.len() - connected;
-            progress.finish_host_check(connected, failed);
-        }
+        // Note: progress bar is completed after russh setup + optional SFTP probe below
 
         // Establish russh sessions to all reachable hosts
         let reachable_names: std::collections::HashSet<String> =
@@ -83,11 +76,25 @@ impl SshPool {
         let reachable_entries: Vec<&HostEntry> =
             hosts.iter().copied().filter(|h| reachable_names.contains(&h.name)).collect();
 
-        let session_pool = Arc::new(
-            RusshSessionPool::setup(&reachable_entries, timeout, global_concurrency).await?,
-        );
+        let mut session_pool_inner =
+            RusshSessionPool::setup(&reachable_entries, timeout, global_concurrency).await?;
 
-        let russh_connected = session_pool.reachable_hosts().len();
+        let russh_connected = session_pool_inner.reachable_hosts().len();
+
+        if probe_scp && russh_connected > 0 {
+            session_pool_inner
+                .run_sftp_probe(&reachable_entries, timeout)
+                .await;
+            let sftp_failed = session_pool_inner.sftp_failed_hosts().len();
+            let effective_ok = russh_connected - sftp_failed;
+            progress.finish_host_check(effective_ok, hosts.len() - effective_ok);
+        } else {
+            let failed = hosts.len() - russh_connected;
+            progress.finish_host_check(russh_connected, failed);
+        }
+
+        let session_pool = Arc::new(session_pool_inner);
+
         Ok((
             Self {
                 session_pool,
@@ -133,6 +140,21 @@ impl SshPool {
     /// Filter a host list to only hosts that are both SSH-reachable and SCP-capable.
     pub fn filter_scp_capable<'a>(&self, hosts: &[&'a HostEntry]) -> Vec<&'a HostEntry> {
         let capable = self.conn_mgr.scp_capable_hosts();
+        hosts
+            .iter()
+            .filter(|h| capable.contains(&h.name))
+            .copied()
+            .collect()
+    }
+
+    /// Get names and errors of hosts that failed the SFTP probe.
+    pub fn sftp_failed_hosts(&self) -> Vec<(String, String)> {
+        self.session_pool.sftp_failed_hosts()
+    }
+
+    /// Filter a host list to only hosts that passed the SFTP probe.
+    pub fn filter_sftp_capable<'a>(&self, hosts: &[&'a HostEntry]) -> Vec<&'a HostEntry> {
+        let capable = self.session_pool.sftp_capable_hosts();
         hosts
             .iter()
             .filter(|h| capable.contains(&h.name))
