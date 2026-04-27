@@ -14,6 +14,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "macr
 # Config
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+ssh2-config = "0.7"
+
+# Password input
+rpassword = "7"
 
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
