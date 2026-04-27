@@ -6,5 +6,6 @@ pub mod filter;
 pub mod pool;
 pub mod process_transport;
 pub mod session_pool;
+pub mod sftp;
 pub mod shell;
 pub mod transport;
