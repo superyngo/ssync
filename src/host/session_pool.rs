@@ -512,7 +512,7 @@ pub async fn exec_on_handle(
         loop {
             match channel.wait().await {
                 Some(russh::ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
-                Some(russh::ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
+                Some(russh::ChannelMsg::ExtendedData { data, ext: 1 }) => {
                     stderr.extend_from_slice(&data);
                 }
                 Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
@@ -525,7 +525,7 @@ pub async fn exec_on_handle(
         }
 
         let exit_code = exit_code.map(|c| c as i32);
-        let success = exit_code.map_or(false, |c| c == 0);
+        let success = exit_code == Some(0);
 
         Ok::<RemoteOutput, anyhow::Error>(RemoteOutput {
             stdout: String::from_utf8_lossy(&stdout).to_string(),

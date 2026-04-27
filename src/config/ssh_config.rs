@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 
 /// A parsed SSH host entry from ~/.ssh/config.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SshHostEntry {
     pub name: String,
