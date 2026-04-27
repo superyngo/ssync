@@ -35,6 +35,10 @@ thiserror = "2"
 # Async trait (for dyn-compatible async traits)
 async-trait = "0.1"
 
+# SSH (russh migration)
+russh = "0.44"
+russh-keys = "0.44"
+
 # Output
 indicatif = "0.17"
 
