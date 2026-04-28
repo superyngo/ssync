@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.2] - 2026-04-28
+
+### Fixed
+- Vendor OpenSSL for musl targets to fix CI build failures (`ssh2-config` 0.7.1 transitively requires `openssl-sys` via `git2`; musl cross-compilation containers lack system OpenSSL headers)
+
 ## [v0.7.1] - 2026-04-28
 
 ### Fixed
