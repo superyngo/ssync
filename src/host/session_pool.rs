@@ -348,7 +348,7 @@ async fn connect_one(
     alias: &str,
     timeout: Duration,
     cache: &mut PassphraseCache,
-    ssh_config: &ssh2_config::SshConfig,
+    ssh_config: &crate::config::ssh_config::ParsedSshConfig,
 ) -> Result<(Handle<SshHandler>, Option<tokio::sync::oneshot::Sender<()>>)> {
     let resolved = crate::config::ssh_config::resolve_host_with_config(alias, ssh_config)?;
 

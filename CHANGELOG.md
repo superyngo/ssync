@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.3] - 2026-04-28
+
+### Fixed
+- musl cross-compilation builds now succeed: removed `ssh2-config` dependency (which
+  unconditionally pulled in `git2 → libgit2-sys → libssh2-sys → openssl-sys`) and replaced
+  it with an enhanced pure-Rust SSH config parser that supports `Host *` wildcard inheritance
+- Added `Cross.toml` with `pre-build` commands as a belt-and-suspenders guard to install
+  `libssl-dev` in the cross Docker containers for all four musl targets
+- Reverted the incorrect v0.7.2 vendored-OpenSSL workaround (target-conditional dependencies
+  do not affect build-dependency compilation inside cross containers)
+
+### Changed
+- `ssh2-config` crate removed; SSH config parsing is now handled entirely by the built-in
+  pure-Rust parser in `src/config/ssh_config.rs`. `ParsedSshConfig` replaces
+  `ssh2_config::SshConfig` as the shared config handle in `session_pool`
+
 ## [v0.7.2] - 2026-04-28
 
 ### Fixed

@@ -1,0 +1,22 @@
+# Cross.toml — configuration for cross-rs cross-compilation
+#
+# ssh2-config 0.7.x has git2 as an unconditional build dependency, which
+# transitively requires openssl-sys (git2 -> libgit2-sys -> libssh2-sys ->
+# openssl-sys). Cross musl Docker containers are Ubuntu-based but ship without
+# libssl-dev, so the pkg-config lookup fails at build-script time.
+#
+# pre-build commands run inside the Docker container before cargo starts,
+# installing the OpenSSL development headers on the host toolchain so that
+# the git2 build script can find them via pkg-config.
+
+[target.x86_64-unknown-linux-musl]
+pre-build = ["apt-get update -qq && apt-get install -y libssl-dev"]
+
+[target.aarch64-unknown-linux-musl]
+pre-build = ["apt-get update -qq && apt-get install -y libssl-dev"]
+
+[target.i686-unknown-linux-musl]
+pre-build = ["dpkg --add-architecture i386 || true", "apt-get update -qq && apt-get install -y libssl-dev libssl-dev:i386"]
+
+[target.armv7-unknown-linux-musleabihf]
+pre-build = ["apt-get update -qq && apt-get install -y libssl-dev"]
