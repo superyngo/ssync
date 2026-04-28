@@ -231,6 +231,80 @@ pub async fn run(
         }
     }
 
+    // Step 3.6: Expand directory paths for entries with no fixed source.
+    // Probes all reachable hosts in parallel and unions the file lists so that
+    // files present on any host are included in the sync set.
+    {
+        let no_source_paths: Vec<String> = all_paths
+            .iter()
+            .filter(|p| {
+                path_source_map
+                    .get(p.as_str())
+                    .is_none_or(|s| s.is_none())
+            })
+            .cloned()
+            .collect();
+
+        if !no_source_paths.is_empty() {
+            let semaphore = Arc::new(Semaphore::new(ctx.concurrency()));
+            let mut handles = Vec::new();
+
+            for host in &reachable_hosts {
+                let host = (*host).clone();
+                let paths = no_source_paths.clone();
+                let sessions = Arc::clone(&pool.session_pool);
+                let timeout = ctx.timeout;
+                let sem = semaphore.clone();
+
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    expand_directory_paths(&host, &paths, false, timeout, &sessions).await
+                }));
+            }
+
+            let mut host_results: Vec<HashMap<String, DirExpandResult>> = Vec::new();
+            for handle in handles {
+                match handle.await {
+                    Ok(Ok(expansions)) => host_results.push(expansions),
+                    Ok(Err(e)) => tracing::warn!(error = %e, "Failed to expand directories"),
+                    Err(e) => tracing::warn!(error = %e, "Directory expand task panicked"),
+                }
+            }
+
+            let dirs_expanded = union_dir_expansions(host_results);
+
+            if !dirs_expanded.is_empty() {
+                let mut new_paths = Vec::new();
+                for path in &all_paths {
+                    if let Some(expanded_files) = dirs_expanded.get(path) {
+                        for file_path in expanded_files {
+                            if !new_paths.contains(file_path) {
+                                new_paths.push(file_path.clone());
+                                path_source_map.entry(file_path.clone()).or_insert(None);
+                            }
+                        }
+                        // Update host_applicable_paths: replace dir with expanded files
+                        if let Some(ref mut host_map) = host_applicable_paths {
+                            for (_host, path_set) in host_map.iter_mut() {
+                                if path_set.remove(path) {
+                                    for file_path in expanded_files {
+                                        path_set.insert(file_path.clone());
+                                    }
+                                }
+                            }
+                        }
+                        if expanded_files.is_empty() {
+                            println!("  {} (empty directory on all hosts, skipping)", path);
+                        }
+                    } else {
+                        new_paths.push(path.clone());
+                    }
+                }
+                all_paths = new_paths;
+            }
+        }
+    }
+
     // Step 4: Batch collect metadata for non-recursive files
     if !all_paths.is_empty() {
         pool.progress.start_collect(reachable_hosts.len());
@@ -1408,6 +1482,28 @@ fn parse_dir_expand_output(output: &str, paths: &[String]) -> HashMap<String, Di
     result
 }
 
+/// Merges per-host `DirExpandResult` maps into a single map of path → union of file lists.
+/// Only paths classified as Directory on at least one host appear in the result.
+/// File and Missing results are excluded (callers keep those paths unchanged).
+fn union_dir_expansions(
+    host_results: Vec<HashMap<String, DirExpandResult>>,
+) -> HashMap<String, Vec<String>> {
+    let mut dirs: HashMap<String, Vec<String>> = HashMap::new();
+    for expansions in host_results {
+        for (path, result) in expansions {
+            if let DirExpandResult::Directory(files) = result {
+                let entry = dirs.entry(path).or_default();
+                for f in files {
+                    if !entry.contains(&f) {
+                        entry.push(f);
+                    }
+                }
+            }
+        }
+    }
+    dirs
+}
+
 /// SSH to source host, detect directories, and list their contents.
 /// Returns a mapping from each original path to its expansion result.
 async fn expand_directory_paths(
@@ -1882,5 +1978,48 @@ mod tests {
             }
             other => panic!("Expected Directory, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_union_dir_expansions_merges_files() {
+        let host_a = HashMap::from([
+            (
+                "~/bin".to_string(),
+                DirExpandResult::Directory(vec!["~/bin/f1".to_string(), "~/bin/f2".to_string()]),
+            ),
+            ("~/.vimrc".to_string(), DirExpandResult::File),
+        ]);
+        let host_b = HashMap::from([
+            (
+                "~/bin".to_string(),
+                DirExpandResult::Directory(vec!["~/bin/f2".to_string(), "~/bin/f3".to_string()]),
+            ),
+            ("~/.vimrc".to_string(), DirExpandResult::File),
+        ]);
+        let result = union_dir_expansions(vec![host_a, host_b]);
+        // Only directory paths end up in the result; files are excluded
+        assert_eq!(result.len(), 1, "only ~/bin should be in result");
+        let files = result.get("~/bin").expect("~/bin must be present");
+        assert_eq!(files.len(), 3, "union must deduplicate f2");
+        assert!(files.contains(&"~/bin/f1".to_string()));
+        assert!(files.contains(&"~/bin/f2".to_string()));
+        assert!(files.contains(&"~/bin/f3".to_string()));
+    }
+
+    #[test]
+    fn test_union_dir_expansions_empty_on_one_host() {
+        // If one host sees an empty directory and another sees files, union has those files
+        let host_a = HashMap::from([(
+            "~/bin".to_string(),
+            DirExpandResult::Directory(vec![]),
+        )]);
+        let host_b = HashMap::from([(
+            "~/bin".to_string(),
+            DirExpandResult::Directory(vec!["~/bin/tool".to_string()]),
+        )]);
+        let result = union_dir_expansions(vec![host_a, host_b]);
+        let files = result.get("~/bin").expect("~/bin must be present");
+        assert_eq!(files.len(), 1);
+        assert!(files.contains(&"~/bin/tool".to_string()));
     }
 }
