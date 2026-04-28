@@ -67,7 +67,13 @@ pub async fn run(
     let (mut all_paths, recursive_entries, mut host_applicable_paths, mut path_source_map) =
         if !files.is_empty() {
             let paths: Vec<String> = files.iter().map(|p| to_tilde_path(p)).collect();
-            (paths, Vec::new(), None, HashMap::new())
+            // Populate path_source_map with cli_source so Step 3.5 directory expansion
+            // runs for directory paths passed via -f when a fixed source (-s) is given.
+            let mut path_src: HashMap<String, Option<&str>> = HashMap::new();
+            for p in &paths {
+                path_src.insert(p.clone(), cli_source);
+            }
+            (paths, Vec::new(), None, path_src)
         } else {
             let (paths, recursive, applicable, path_src) =
                 collect_sync_paths_scoped(ctx, &hosts, cli_source);
@@ -1318,7 +1324,7 @@ fn build_dir_expand_cmd(paths: &[String], recursive: bool, shell: ShellType) -> 
                    echo \"---PATH:$orig\"; \
                    if [ -d \"$p\" ]; then \
                      echo \"DIR\"; \
-                     find \"$p\"{depth} -type f 2>/dev/null | sed \"s|^$HOME/|~/|\" | sort; \
+                     find -L \"$p\"{depth} -type f 2>/dev/null | sed \"s|^$HOME/|~/|\" | sort; \
                    elif [ -e \"$p\" ]; then \
                      echo \"FILE\"; \
                    else \
@@ -1789,6 +1795,7 @@ mod tests {
         assert!(cmd.contains("[ -d"));
         assert!(cmd.contains("-maxdepth 1"));
         assert!(cmd.contains("find"));
+        assert!(cmd.contains("find -L"), "find must use -L to follow symlinks");
         assert!(cmd.contains("mydir"));
         assert!(cmd.contains("single.conf"));
     }
@@ -1799,6 +1806,7 @@ mod tests {
         let cmd = build_dir_expand_cmd(&paths, true, ShellType::Sh);
         assert!(cmd.contains("---PATH:"));
         assert!(cmd.contains("find"));
+        assert!(cmd.contains("find -L"), "find must use -L to follow symlinks");
         assert!(
             !cmd.contains("-maxdepth"),
             "recursive should not have maxdepth"
