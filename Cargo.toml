@@ -61,6 +61,11 @@ tempfile = "3"
 # JSON
 serde_json = "1"
 
+[target.'cfg(target_env = "musl")'.dependencies]
+# ssh2-config 0.7.1 has git2 as a mandatory build dep, which requires openssl.
+# Vendored OpenSSL compiles it from source, avoiding missing system headers in musl containers.
+openssl = { version = "0.10", features = ["vendored"] }
+
 [features]
 default = ["tui"]
 tui = ["ratatui", "crossterm"]
