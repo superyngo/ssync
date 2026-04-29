@@ -1,4 +1,4 @@
-use crate::config::schema::HostEntry;
+use crate::config::schema::{HostEntry, ShellType};
 
 /// Filter hosts based on CLI parameters.
 /// Matches groups from host[].groups tags.
@@ -8,6 +8,7 @@ pub fn filter_hosts<'a>(
     groups: &[String],
     host_names: &[String],
     all: bool,
+    shells: &[ShellType],
 ) -> Vec<&'a HostEntry> {
     if all {
         return hosts.iter().collect();
@@ -21,6 +22,10 @@ pub fn filter_hosts<'a>(
 
     if !host_names.is_empty() {
         result.retain(|h| host_names.contains(&h.name));
+    }
+
+    if !shells.is_empty() {
+        result.retain(|h| shells.contains(&h.shell));
     }
 
     result
@@ -60,14 +65,14 @@ mod tests {
     #[test]
     fn test_filter_all() {
         let hosts = make_hosts();
-        let result = filter_hosts(&hosts, &[], &[], true);
+        let result = filter_hosts(&hosts, &[], &[], true, &[]);
         assert_eq!(result.len(), 3);
     }
 
     #[test]
     fn test_filter_by_group() {
         let hosts = make_hosts();
-        let result = filter_hosts(&hosts, &["web".into()], &[], false);
+        let result = filter_hosts(&hosts, &["web".into()], &[], false, &[]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "a");
         assert_eq!(result[1].name, "c");
@@ -76,7 +81,7 @@ mod tests {
     #[test]
     fn test_filter_by_host_name() {
         let hosts = make_hosts();
-        let result = filter_hosts(&hosts, &[], &["b".into()], false);
+        let result = filter_hosts(&hosts, &[], &["b".into()], false, &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "b");
     }
@@ -84,8 +89,44 @@ mod tests {
     #[test]
     fn test_filter_intersection() {
         let hosts = make_hosts();
-        let result = filter_hosts(&hosts, &["web".into()], &["c".into()], false);
+        let result = filter_hosts(&hosts, &["web".into()], &["c".into()], false, &[]);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "c");
+    }
+
+    #[test]
+    fn test_filter_by_shell() {
+        let hosts = make_hosts();
+        let result = filter_hosts(&hosts, &[], &[], false, &[ShellType::Sh]);
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|h| h.shell == ShellType::Sh));
+    }
+
+    #[test]
+    fn test_filter_by_shell_powershell() {
+        let hosts = make_hosts();
+        let result = filter_hosts(&hosts, &[], &[], false, &[ShellType::PowerShell]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "b");
+    }
+
+    #[test]
+    fn test_filter_by_shell_multiple() {
+        let hosts = make_hosts();
+        let result = filter_hosts(
+            &hosts,
+            &[],
+            &[],
+            false,
+            &[ShellType::Sh, ShellType::PowerShell],
+        );
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_filter_no_shell_filter_returns_all_when_no_other_filter() {
+        let hosts = make_hosts();
+        let result = filter_hosts(&hosts, &[], &[], false, &[]);
+        assert_eq!(result.len(), 3);
     }
 }

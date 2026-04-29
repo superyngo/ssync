@@ -36,6 +36,10 @@ pub struct TargetArgs {
     #[arg(short, long)]
     pub all: bool,
 
+    /// Filter by remote shell type (comma-separated: sh, powershell, cmd)
+    #[arg(short = 'S', long, value_delimiter = ',')]
+    pub shell: Vec<crate::config::schema::ShellType>,
+
     /// Execute sequentially instead of in parallel
     #[arg(long)]
     pub serial: bool,

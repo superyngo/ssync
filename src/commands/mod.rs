@@ -25,6 +25,8 @@ pub enum TargetMode {
     Hosts(Vec<String>),
     /// --group: hosts belonging to named groups
     Groups(Vec<String>),
+    /// --shell: hosts with the specified shell type(s)
+    Shell(Vec<crate::config::schema::ShellType>),
 }
 
 /// Shared context available to all commands.
@@ -99,11 +101,43 @@ impl Context {
                 .iter()
                 .filter(|h| h.groups.iter().any(|g| groups.contains(g)))
                 .collect(),
+            TargetMode::Shell(shells) => self
+                .config
+                .host
+                .iter()
+                .filter(|h| shells.contains(&h.shell))
+                .collect(),
         };
 
         if hosts.is_empty() {
             let mut hint = String::from("No hosts matched the specified filter.");
-            append_available_hints(&self.config, &mut hint);
+            if let TargetMode::Shell(shells) = &self.mode {
+                hint = format!(
+                    "No hosts matched shell type: {}",
+                    shells
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                let mut shell_map: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for h in &self.config.host {
+                    shell_map
+                        .entry(h.shell.to_string())
+                        .or_default()
+                        .push(h.name.clone());
+                }
+                if !shell_map.is_empty() {
+                    let parts: Vec<String> = shell_map
+                        .iter()
+                        .map(|(shell, hosts)| format!("{} ({})", shell, hosts.join(", ")))
+                        .collect();
+                    hint.push_str(&format!("\nAvailable shells: {}", parts.join(", ")));
+                }
+            } else {
+                append_available_hints(&self.config, &mut hint);
+            }
             bail!("{}", hint);
         }
 
@@ -188,6 +222,7 @@ fn filter_entries_by_mode<'a, T>(
             TargetMode::All => get_enable_all(e),
             TargetMode::Groups(g) => get_groups(e).iter().any(|eg| g.contains(eg)),
             TargetMode::Hosts(_) => get_enable_hosts(e),
+            TargetMode::Shell(_) => get_enable_hosts(e),
         })
         .collect()
 }
@@ -197,12 +232,13 @@ fn resolve_target_mode(target: &TargetArgs, config: &AppConfig) -> Result<Target
     let has_all = target.all;
     let has_hosts = !target.host.is_empty();
     let has_groups = !target.group.is_empty();
+    let has_shell = !target.shell.is_empty();
 
-    let count = has_all as u8 + has_hosts as u8 + has_groups as u8;
+    let count = has_all as u8 + has_hosts as u8 + has_groups as u8 + has_shell as u8;
 
     if count == 0 {
         let mut hint = String::from(
-            "Target required. Use --group/-g, --host/-h, or --all/-a to specify targets.",
+            "Target required. Use --group/-g, --host/-h, --shell/-S, or --all/-a to specify targets.",
         );
         if config.host.is_empty() {
             hint.push_str("\nHint: Run 'ssync init' first to import hosts from ~/.ssh/config.");
@@ -213,15 +249,17 @@ fn resolve_target_mode(target: &TargetArgs, config: &AppConfig) -> Result<Target
     }
 
     if count > 1 {
-        bail!("Only one of --all/-a, --host/-h, or --group/-g can be used at a time.");
+        bail!("Only one of --all/-a, --host/-h, --group/-g, or --shell/-S can be used at a time.");
     }
 
     if has_all {
         Ok(TargetMode::All)
     } else if has_hosts {
         Ok(TargetMode::Hosts(target.host.clone()))
-    } else {
+    } else if has_groups {
         Ok(TargetMode::Groups(target.group.clone()))
+    } else {
+        Ok(TargetMode::Shell(target.shell.clone()))
     }
 }
 

@@ -93,6 +93,9 @@ pub async fn run(
         super::TargetMode::All => "global".to_string(),
         super::TargetMode::Groups(g) => g.join(", "),
         super::TargetMode::Hosts(h) => h.join(", "),
+        super::TargetMode::Shell(s) => {
+            s.iter().map(|sh| sh.to_string()).collect::<Vec<_>>().join(", ")
+        }
     };
     println!("\n── Sync: {} ──", label);
 
