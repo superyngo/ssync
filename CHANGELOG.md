@@ -7,9 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.8.0] - 2026-04-29
+
+### Added
+- `--shell/-s` target filter to select hosts by detected shell type (sh, powershell, cmd)
+- `--out` report output for `run`, `exec`, `check`, `sync`, and `checkout` commands (JSON and HTML)
+- `default_output_format` config setting to set default report format when `--out` path has no extension
+- Per-host raw output JSON in HTML reports via collapsible details
+- Auto-generated report filenames now respect `default_output_format`
+
 ### Changed
-- CLI short flags were reassigned for consistency: `--shell/-s`, `run|exec --sudo/-S`, and `sync --source/-S`
-- HTML report output now includes top-level `task` and `targets` JSON sections plus per-host raw `output` JSON, matching JSON report information density
+- CLI short flags reassigned for consistency: `--shell/-s`, `run|exec --sudo/-S`, `sync --source/-S`
+- Removed `--format` from checkout; `--out` now handles both JSON and HTML output
+- Removed "Collecting" progress bar from check and sync commands for cleaner output
+- Deleted temporary test scripts (test.ps1, test.sh)
+
+### Fixed
+- Raw probe output strings now use move instead of clone for efficiency
+- Unified `Utc::now()` timestamp handling in check command
 
 ## [v0.7.3] - 2026-04-28
 
