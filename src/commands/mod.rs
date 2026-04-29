@@ -120,8 +120,7 @@ impl Context {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-                let mut shell_map: std::collections::BTreeMap<String, Vec<String>> =
-                    std::collections::BTreeMap::new();
+                let mut shell_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
                 for h in &self.config.host {
                     shell_map
                         .entry(h.shell.to_string())
