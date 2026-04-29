@@ -68,9 +68,11 @@ pub struct ReportSummary {
 /// - `*.html` → HTML
 /// - other extension → error
 pub fn write_report(report: &OperationReport, out: &str, command: &str) -> Result<()> {
+    use anyhow::Context;
     use std::path::Path;
 
-    let path = if out.is_empty() {
+    let auto_generated = out.is_empty();
+    let path = if auto_generated {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
         format!("ssync-{}-{}.json", command, ts)
     } else {
@@ -83,21 +85,26 @@ pub fn write_report(report: &OperationReport, out: &str, command: &str) -> Resul
         .unwrap_or("json")
         .to_lowercase();
 
-    match ext.as_str() {
-        "json" => {
-            let json = serde_json::to_string_pretty(report)?;
-            std::fs::write(&path, json)?;
-        }
-        "html" => {
-            let html = render_html_report(report);
-            std::fs::write(&path, html)?;
-        }
+    let content = match ext.as_str() {
+        "json" => serde_json::to_string_pretty(report)?,
+        "html" => render_html_report(report),
         other => {
-            bail!(
-                "Unsupported output format '.{}'. Use .json or .html",
-                other
-            );
+            bail!("Unsupported output format '.{}'. Use .json or .html", other);
         }
+    };
+
+    if auto_generated {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("Failed to create report file '{}' (already exists?)", path))?;
+        f.write_all(content.as_bytes())
+            .with_context(|| format!("Failed to write report to '{}'", path))?;
+    } else {
+        std::fs::write(&path, &content)
+            .with_context(|| format!("Failed to write report to '{}'", path))?;
     }
 
     println!("Report written to {}", path);
@@ -215,7 +222,8 @@ fn render_output_html(output: &serde_json::Value) -> String {
         if let Some(probes) = output.get("probe_outputs") {
             html.push_str("<details><summary>Raw probe output</summary><pre>");
             html.push_str(&html_escape(
-                &serde_json::to_string_pretty(probes).unwrap_or_default(),
+                &serde_json::to_string_pretty(probes)
+                    .unwrap_or_else(|e| format!("(serialization error: {})", e)),
             ));
             html.push_str("</pre></details>");
         }
@@ -229,7 +237,9 @@ fn render_output_html(output: &serde_json::Value) -> String {
             if !arr.is_empty() {
                 html.push_str("<strong>Synced:</strong><br>");
                 for f in arr {
-                    html.push_str(&format!("  {}<br>", html_escape(&f.to_string())));
+                    let fallback = f.to_string();
+                    let path_str = f.as_str().unwrap_or(&fallback);
+                    html.push_str(&format!("  {}<br>", html_escape(path_str)));
                 }
             }
         }
@@ -238,7 +248,9 @@ fn render_output_html(output: &serde_json::Value) -> String {
                 if !arr.is_empty() {
                     html.push_str("<strong>Skipped (in-sync):</strong><br>");
                     for f in arr {
-                        html.push_str(&format!("  {}<br>", html_escape(&f.to_string())));
+                        let fallback = f.to_string();
+                        let path_str = f.as_str().unwrap_or(&fallback);
+                        html.push_str(&format!("  {}<br>", html_escape(path_str)));
                     }
                 }
             }
@@ -269,7 +281,8 @@ fn render_output_html(output: &serde_json::Value) -> String {
             "Online: {} | Collected: {}<details><summary>Snapshot</summary><pre>{}</pre></details>",
             if online { "✓" } else { "✗" },
             html_escape(collected_at),
-            html_escape(&serde_json::to_string_pretty(snap).unwrap_or_default()),
+            html_escape(&serde_json::to_string_pretty(snap)
+                .unwrap_or_else(|e| format!("(serialization error: {})", e))),
         );
     }
 
@@ -303,6 +316,7 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 #[cfg(test)]
@@ -364,18 +378,21 @@ mod tests {
     fn test_write_report_auto_filename() {
         let dir = TempDir::new().unwrap();
         let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
         let report = sample_report("check");
-        write_report(&report, "", "check").unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_report(&report, "", "check")
+        }));
+        let _ = std::env::set_current_dir(&orig);
         let entries: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
+        write_result.unwrap().unwrap();
         assert_eq!(entries.len(), 1);
         let name = entries[0].file_name().to_string_lossy().to_string();
         assert!(name.starts_with("ssync-check-"));
         assert!(name.ends_with(".json"));
-        std::env::set_current_dir(orig).unwrap();
     }
 
     #[test]
