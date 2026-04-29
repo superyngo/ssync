@@ -36,8 +36,8 @@ impl DisplayColumns {
 
 pub async fn run(
     ctx: &Context,
-    history: bool,
-    since: Option<String>,
+    _history: bool,
+    _since: Option<String>,
 ) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
     let host_names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
@@ -45,9 +45,6 @@ pub async fn run(
 
     let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
     print_table_report(&snapshots, &columns);
-
-    // Suppress unused-variable warnings for history/since until Task 10 wires them.
-    let _ = (history, since);
 
     Ok(())
 }
@@ -374,6 +371,7 @@ fn print_table_report(snapshots: &[HostSnapshot], columns: &DisplayColumns) {
     }
 }
 
+#[allow(dead_code)]
 fn build_json_report(
     ctx: &Context,
     host_names: &[&str],
@@ -447,6 +445,7 @@ fn build_json_report(
     Ok(serde_json::Value::Object(result))
 }
 
+#[allow(dead_code)]
 fn parse_since(since: Option<&str>) -> Result<i64> {
     let now = chrono::Utc::now().timestamp();
     match since {
@@ -475,6 +474,7 @@ fn parse_since(since: Option<&str>) -> Result<i64> {
     }
 }
 
+#[allow(dead_code)]
 fn render_html(data: &serde_json::Value) -> Result<String> {
     let json_str = serde_json::to_string_pretty(data)?;
     let html = format!(
