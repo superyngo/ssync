@@ -9,6 +9,7 @@ use crate::host::concurrency::ConcurrencyLimiter;
 use crate::host::pool::SshPool;
 use crate::host::session_pool::RusshSessionPool;
 use crate::output::printer;
+use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSummary};
 use crate::output::summary::SyncSummary;
 
 use super::{Context, TargetMode};
@@ -59,10 +60,19 @@ pub async fn run(
     cli_source: Option<&str>,
     output: &crate::cli::OutputArgs,
 ) -> Result<()> {
-    let _ = output; // wired in Task 9
+    let executed_at = chrono::Utc::now().to_rfc3339();
+    // Per-host (files_synced, files_skipped) accumulator
+    let mut host_file_map: std::collections::HashMap<String, (Vec<String>, Vec<String>)> =
+        std::collections::HashMap::new();
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
+    // Collect host names for the report (used after pool is consumed)
+    let host_names: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
     let mut summary = SyncSummary::default();
+
+    for host in &hosts {
+        host_file_map.entry(host.name.clone()).or_insert((Vec::new(), Vec::new()));
+    }
 
     // Step 1: Collect all file paths, separating recursive from non-recursive.
     // For --groups: also build per-host applicable path sets for scoping.
@@ -402,6 +412,9 @@ pub async fn run(
                 if !d.synced_hosts.is_empty() {
                     printer::print_host_line("passed", "ok", &d.synced_hosts.join(", "));
                 }
+                for h in &d.synced_hosts {
+                    host_file_map.entry(h.clone()).or_default().1.push(d.path.clone());
+                }
             }
             if !all_decisions.is_empty() {
                 println!("  [dry-run] No changes applied.");
@@ -471,6 +484,12 @@ pub async fn run(
                             &succeeded,
                             &failed_uploads,
                         );
+                        for target in &succeeded {
+                            host_file_map.entry(target.clone()).or_default().0.push(decision.path.clone());
+                        }
+                        for h in &decision.synced_hosts {
+                            host_file_map.entry(h.clone()).or_default().1.push(decision.path.clone());
+                        }
                     }
                     Err(e) => {
                         printer::print_host_line("failed", "error", &decision.source_host);
@@ -578,6 +597,55 @@ pub async fn run(
     pool.shutdown().await;
 
     summary.print();
+
+    if let Some(out) = &output.out {
+        let configured_paths: Vec<String> = ctx
+            .resolve_syncs()
+            .iter()
+            .flat_map(|e| e.paths.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        let report_results: Vec<HostResult> = host_names
+            .iter()
+            .map(|h| {
+                let (synced, skipped) = host_file_map
+                    .get(h)
+                    .cloned()
+                    .unwrap_or_default();
+                HostResult {
+                    host: h.clone(),
+                    status: "success".to_string(),
+                    duration_ms: None,
+                    output: serde_json::json!({
+                        "files_synced": synced,
+                        "files_skipped": skipped,
+                    }),
+                }
+            })
+            .collect();
+
+        let rep_summary = ReportSummary {
+            total: report_results.len(),
+            success: report_results.len(),
+            failed: 0,
+            skipped: 0,
+        };
+        let targets: Vec<String> = host_names.clone();
+
+        let report = OperationReport {
+            executed_at,
+            command: "sync".to_string(),
+            filter: FilterInfo::from_mode(&ctx.mode),
+            task: serde_json::json!({ "paths": configured_paths }),
+            targets,
+            results: report_results,
+            summary: rep_summary,
+        };
+        crate::output::report::write_report(&report, out, "sync")?;
+    }
+
     Ok(())
 }
 
