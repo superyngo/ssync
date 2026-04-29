@@ -10,13 +10,14 @@ use crate::output::printer;
 use crate::output::summary::Summary;
 use crate::state::retention;
 
+use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSummary};
+
 use super::{Context, TargetMode};
 
 /// Per-host check configuration: (enabled_metrics, check_paths).
 type HostCheckConfig = (Vec<String>, Vec<(String, String)>);
 
 pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
-    let _ = output; // wired in Task 8
     let hosts = ctx.resolve_hosts()?;
 
     // Build per-host check config: each host gets its own (enabled, check_paths).
@@ -40,6 +41,9 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
 
     // Report unreachable hosts immediately
     let now_ts = chrono::Utc::now().timestamp();
+    let mut summary = Summary::default();
+    let mut report_results: Vec<HostResult> = Vec::new();
+    let executed_at = chrono::Utc::now().to_rfc3339();
     for (name, err) in pool.failed_hosts() {
         // Write offline status to DB
         ctx.db.execute(
@@ -52,14 +56,21 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
             rusqlite::params![name, now_ts],
         )?;
         printer::print_host_line(&name, "error", &format!("unreachable — {}", err));
+        report_results.push(HostResult {
+            host: name.clone(),
+            status: "error".to_string(),
+            duration_ms: None,
+            output: serde_json::json!({
+                "metrics": {},
+                "probe_outputs": {},
+                "error": format!("unreachable: {}", err),
+            }),
+        });
     }
 
-    let mut summary = Summary::default();
     for (name, err) in pool.failed_hosts() {
         summary.add_failure(&name, &err);
     }
-
-    // Collect metrics from reachable hosts using batched SSH
     let reachable = pool.filter_reachable(&hosts);
     pool.progress.start_collect(reachable.len());
 
@@ -110,6 +121,17 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
                         &format!("failed ({:.1}s) — {}", elapsed.as_secs_f64(), err_detail),
                     );
                     summary.add_failure(&host.name, err_detail);
+                    report_results.push(HostResult {
+                        host: host.name.clone(),
+                        status: "error".to_string(),
+                        duration_ms: Some(elapsed.as_millis() as u64),
+                        output: serde_json::json!({
+                            "metrics": cr.data,
+                            "probe_outputs": {
+                                "metrics_batch": { "stdout": cr.metrics_raw_stdout, "stderr": cr.metrics_raw_stderr }
+                            },
+                        }),
+                    });
                 } else if cr.failed > 0 {
                     ctx.db.execute(
                         "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 1, ?3)",
@@ -133,6 +155,17 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
                         ),
                     );
                     summary.add_success();
+                    report_results.push(HostResult {
+                        host: host.name.clone(),
+                        status: "success".to_string(),
+                        duration_ms: Some(elapsed.as_millis() as u64),
+                        output: serde_json::json!({
+                            "metrics": cr.data,
+                            "probe_outputs": {
+                                "metrics_batch": { "stdout": cr.metrics_raw_stdout, "stderr": cr.metrics_raw_stderr }
+                            },
+                        }),
+                    });
                 } else {
                     ctx.db.execute(
                         "INSERT INTO check_snapshots (host, collected_at, online, raw_json) VALUES (?1, ?2, 1, ?3)",
@@ -153,6 +186,17 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
                         ),
                     );
                     summary.add_success();
+                    report_results.push(HostResult {
+                        host: host.name.clone(),
+                        status: "success".to_string(),
+                        duration_ms: Some(elapsed.as_millis() as u64),
+                        output: serde_json::json!({
+                            "metrics": cr.data,
+                            "probe_outputs": {
+                                "metrics_batch": { "stdout": cr.metrics_raw_stdout, "stderr": cr.metrics_raw_stderr }
+                            },
+                        }),
+                    });
                 }
             }
             Err(e) => {
@@ -167,6 +211,16 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
                 )?;
                 printer::print_host_line(&host.name, "error", &e.to_string());
                 summary.add_failure(&host.name, &e.to_string());
+                report_results.push(HostResult {
+                    host: host.name.clone(),
+                    status: "error".to_string(),
+                    duration_ms: Some(elapsed.as_millis() as u64),
+                    output: serde_json::json!({
+                        "metrics": {},
+                        "probe_outputs": {},
+                        "error": e.to_string(),
+                    }),
+                });
             }
         }
     }
@@ -176,6 +230,32 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
 
     summary.print();
     retention::cleanup(&ctx.db, ctx.config.settings.data_retention_days)?;
+
+    if let Some(out) = &output.out {
+        let enabled_metrics: Vec<String> = host_configs
+            .values()
+            .flat_map(|(enabled, _)| enabled.iter().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let rep_summary = ReportSummary {
+            total: report_results.len(),
+            success: report_results.iter().filter(|r| r.status == "success").count(),
+            failed: report_results.iter().filter(|r| r.status == "error").count(),
+            skipped: 0,
+        };
+        let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
+        let report = OperationReport {
+            executed_at,
+            command: "check".to_string(),
+            filter: FilterInfo::from_mode(&ctx.mode),
+            task: serde_json::json!({ "metrics": enabled_metrics }),
+            targets,
+            results: report_results,
+            summary: rep_summary,
+        };
+        crate::output::report::write_report(&report, out, "check")?;
+    }
 
     Ok(())
 }

@@ -10,6 +10,10 @@ pub struct CollectionResult {
     pub succeeded: usize,
     pub failed: usize,
     pub errors: Vec<String>,
+    /// Raw stdout from the metrics batch SSH call (empty string if no metrics were collected).
+    pub metrics_raw_stdout: String,
+    /// Raw stderr from the metrics batch SSH call.
+    pub metrics_raw_stderr: String,
 }
 
 /// Collect all enabled metrics from a remote host using batched SSH commands.
@@ -28,6 +32,8 @@ pub async fn collect_pooled(
     let mut succeeded: usize = 0;
     let mut failed: usize = 0;
     let mut errors: Vec<String> = Vec::new();
+    let mut metrics_raw_stdout = String::new();
+    let mut metrics_raw_stderr = String::new();
 
     // Batch all metrics into a single SSH call
     if !enabled.is_empty() {
@@ -38,6 +44,8 @@ pub async fn collect_pooled(
                 .await
             {
                 Ok(output) if output.success => {
+                    metrics_raw_stdout = output.stdout.clone();
+                    metrics_raw_stderr = output.stderr.clone();
                     let parsed = super::parser::parse_batch(host.shell, enabled, &output.stdout);
                     for metric in enabled {
                         if let Some(value) = parsed.get(metric) {
@@ -52,6 +60,8 @@ pub async fn collect_pooled(
                 }
                 Ok(output) => {
                     // Partial: try to parse what we got even if exit code non-zero
+                    metrics_raw_stdout = output.stdout.clone();
+                    metrics_raw_stderr = output.stderr.clone();
                     let parsed = super::parser::parse_batch(host.shell, enabled, &output.stdout);
                     for metric in enabled {
                         if let Some(value) = parsed.get(metric) {
@@ -125,6 +135,8 @@ pub async fn collect_pooled(
         succeeded,
         failed,
         errors,
+        metrics_raw_stdout,
+        metrics_raw_stderr,
     })
 }
 
@@ -139,6 +151,8 @@ mod tests {
             succeeded: 0,
             failed: 0,
             errors: vec![],
+            metrics_raw_stdout: String::new(),
+            metrics_raw_stderr: String::new(),
         };
         assert_eq!(cr.succeeded, 0);
         assert_eq!(cr.failed, 0);
