@@ -224,7 +224,7 @@ fn build_host_check_configs(
             configs
         }
         _ => {
-            // Flat merge for --hosts and --all
+            // Flat merge for --hosts, --shell, and --all
             let checks = ctx.resolve_checks();
             let mut enabled: Vec<String> = Vec::new();
             let mut check_paths: Vec<(String, String)> = Vec::new();

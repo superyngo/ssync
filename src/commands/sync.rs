@@ -645,7 +645,7 @@ fn collect_sync_paths_scoped<'a>(
             (all_paths_set, recursive, Some(host_paths), path_sources)
         }
         _ => {
-            // Flat merge for --hosts and --all
+            // Flat merge for --hosts, --shell, and --all
             let sync_entries = ctx.resolve_syncs();
             let mut paths = Vec::new();
             let mut recursive = Vec::new();

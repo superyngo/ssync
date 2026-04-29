@@ -10,7 +10,7 @@ pub mod sync;
 
 use anyhow::{bail, Result};
 use rusqlite::Connection;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::cli::TargetArgs;

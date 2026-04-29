@@ -2,6 +2,9 @@ use crate::config::schema::{HostEntry, ShellType};
 
 /// Filter hosts based on CLI parameters.
 /// Matches groups from host[].groups tags.
+///
+/// NOTE: This function is not yet called by the command pipeline; `Context::resolve_hosts`
+/// performs equivalent inline filtering. Keep in sync with that implementation.
 #[allow(dead_code)]
 pub fn filter_hosts<'a>(
     hosts: &'a [HostEntry],

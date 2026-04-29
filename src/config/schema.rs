@@ -133,7 +133,7 @@ pub struct CheckEntry {
     #[serde(default)]
     pub groups: Vec<String>,
 
-    /// Whether this entry applies when using --hosts.
+    /// Whether this entry applies when using --host or --shell.
     #[serde(default = "default_true")]
     pub enable_hosts: bool,
 
@@ -154,7 +154,7 @@ pub struct SyncEntry {
     /// Groups this sync applies to. Empty = unscoped.
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Whether this entry applies when using --hosts.
+    /// Whether this entry applies when using --host or --shell.
     #[serde(default = "default_true")]
     pub enable_hosts: bool,
     /// Whether this entry applies when using --all.
