@@ -44,9 +44,9 @@ pub async fn collect_pooled(
                 .await
             {
                 Ok(output) if output.success => {
-                    metrics_raw_stdout = output.stdout.clone();
-                    metrics_raw_stderr = output.stderr.clone();
-                    let parsed = super::parser::parse_batch(host.shell, enabled, &output.stdout);
+                    metrics_raw_stdout = output.stdout;
+                    metrics_raw_stderr = output.stderr;
+                    let parsed = super::parser::parse_batch(host.shell, enabled, &metrics_raw_stdout);
                     for metric in enabled {
                         if let Some(value) = parsed.get(metric) {
                             result.insert(metric.clone(), value.clone());
@@ -60,15 +60,15 @@ pub async fn collect_pooled(
                 }
                 Ok(output) => {
                     // Partial: try to parse what we got even if exit code non-zero
-                    metrics_raw_stdout = output.stdout.clone();
-                    metrics_raw_stderr = output.stderr.clone();
-                    let parsed = super::parser::parse_batch(host.shell, enabled, &output.stdout);
+                    metrics_raw_stdout = output.stdout;
+                    metrics_raw_stderr = output.stderr;
+                    let parsed = super::parser::parse_batch(host.shell, enabled, &metrics_raw_stdout);
                     for metric in enabled {
                         if let Some(value) = parsed.get(metric) {
                             result.insert(metric.clone(), value.clone());
                             succeeded += 1;
                         } else {
-                            let msg = format!("{}: {}", metric, output.stderr.trim());
+                            let msg = format!("{}: {}", metric, metrics_raw_stderr.trim());
                             failed += 1;
                             errors.push(msg);
                         }

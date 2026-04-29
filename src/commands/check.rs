@@ -40,10 +40,11 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
     .await?;
 
     // Report unreachable hosts immediately
-    let now_ts = chrono::Utc::now().timestamp();
+    let run_start = chrono::Utc::now();
+    let now_ts = run_start.timestamp();
+    let executed_at = run_start.to_rfc3339();
     let mut summary = Summary::default();
     let mut report_results: Vec<HostResult> = Vec::new();
-    let executed_at = chrono::Utc::now().to_rfc3339();
     for (name, err) in pool.failed_hosts() {
         // Write offline status to DB
         ctx.db.execute(
