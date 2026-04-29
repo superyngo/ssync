@@ -1,8 +1,6 @@
 use anyhow::{bail, Result};
 use rusqlite::params;
 
-use crate::cli::OutputFormat;
-
 use super::Context;
 
 /// Snapshot row from the database.
@@ -38,51 +36,18 @@ impl DisplayColumns {
 
 pub async fn run(
     ctx: &Context,
-    format: OutputFormat,
     history: bool,
     since: Option<String>,
-    out: Option<String>,
 ) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
     let host_names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
     let columns = DisplayColumns::from_context(ctx);
 
-    match format {
-        OutputFormat::Json => {
-            let path = out.as_deref().unwrap_or("-");
-            let data = build_json_report(ctx, &host_names, history, since.as_deref())?;
-            if path == "-" {
-                println!("{}", serde_json::to_string_pretty(&data)?);
-            } else {
-                std::fs::write(path, serde_json::to_string_pretty(&data)?)?;
-                println!("JSON report written to {}", path);
-            }
-        }
-        OutputFormat::Html => {
-            let path = out
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("--out is required for HTML format"))?;
-            let data = build_json_report(ctx, &host_names, history, since.as_deref())?;
-            let html = render_html(&data)?;
-            std::fs::write(path, html)?;
-            println!("HTML report written to {}", path);
-        }
-        OutputFormat::Table => {
-            let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
-            print_table_report(&snapshots, &columns);
-        }
-        OutputFormat::Tui => {
-            #[cfg(feature = "tui")]
-            {
-                let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
-                run_tui(&snapshots, &columns)?;
-            }
-            #[cfg(not(feature = "tui"))]
-            {
-                bail!("TUI support not compiled. Use --format json or --format html.");
-            }
-        }
-    }
+    let snapshots = fetch_latest_snapshots(ctx, &host_names)?;
+    print_table_report(&snapshots, &columns);
+
+    // Suppress unused-variable warnings for history/since until Task 10 wires them.
+    let _ = (history, since);
 
     Ok(())
 }

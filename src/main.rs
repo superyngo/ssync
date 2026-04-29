@@ -87,13 +87,12 @@ async fn main() -> Result<()> {
         }
         Commands::Checkout {
             target,
-            format,
             history,
             since,
-            out,
+            ..
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::checkout::run(&ctx, format, history, since, out).await
+            commands::checkout::run(&ctx, history, since).await
         }
         Commands::Sync {
             target,

@@ -92,10 +92,6 @@ pub enum Commands {
         #[command(flatten)]
         target: TargetArgs,
 
-        /// Output format
-        #[arg(long, default_value = "tui")]
-        format: OutputFormat,
-
         /// Show trend history
         #[arg(long)]
         history: bool,
@@ -104,9 +100,9 @@ pub enum Commands {
         #[arg(long)]
         since: Option<String>,
 
-        /// Output file path (required for html/json)
-        #[arg(short, long)]
-        out: Option<String>,
+        /// Print help
+        #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
+        help: Option<bool>,
     },
 
     /// Synchronize files across hosts using collect-decide-distribute model
@@ -218,14 +214,6 @@ pub enum Commands {
         #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
         help: Option<bool>,
     },
-}
-
-#[derive(Clone, clap::ValueEnum)]
-pub enum OutputFormat {
-    Tui,
-    Table,
-    Html,
-    Json,
 }
 
 #[derive(Clone, clap::ValueEnum)]
