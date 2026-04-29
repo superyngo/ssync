@@ -100,11 +100,13 @@ pub struct HostEntry {
     pub proxy_jump: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
+#[clap(rename_all = "lowercase")]
 pub enum ShellType {
     Sh,
     #[serde(rename = "powershell")]
+    #[clap(name = "powershell")]
     PowerShell,
     Cmd,
 }
