@@ -10,7 +10,13 @@ use crate::output::summary::Summary;
 
 use super::Context;
 
-pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool, output: &crate::cli::OutputArgs) -> Result<()> {
+pub async fn run(
+    ctx: &Context,
+    command: &str,
+    sudo: bool,
+    _yes: bool,
+    output: &crate::cli::OutputArgs,
+) -> Result<()> {
     let hosts = ctx.resolve_hosts()?;
 
     // Set up SSH connection pool
@@ -138,8 +144,14 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool, output: &
     if let Some(out) = &output.out {
         let rep_summary = ReportSummary {
             total: report_results.len(),
-            success: report_results.iter().filter(|r| r.status == "success").count(),
-            failed: report_results.iter().filter(|r| r.status == "error").count(),
+            success: report_results
+                .iter()
+                .filter(|r| r.status == "success")
+                .count(),
+            failed: report_results
+                .iter()
+                .filter(|r| r.status == "error")
+                .count(),
             skipped: 0,
         };
         let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
@@ -152,7 +164,12 @@ pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool, output: &
             results: report_results,
             summary: rep_summary,
         };
-        crate::output::report::write_report(&report, out, "run")?;
+        crate::output::report::write_report(
+            &report,
+            out,
+            "run",
+            ctx.config.settings.default_output_format.as_deref(),
+        )?;
     }
 
     Ok(())

@@ -45,6 +45,11 @@ pub struct Settings {
     /// Default: ~/.local/state/ssync (Linux/macOS) or %LOCALAPPDATA%/ssync (Windows)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_dir: Option<PathBuf>,
+
+    /// Default output format when --out is used without an extension.
+    /// Priority: path extension > this setting > "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_output_format: Option<String>,
 }
 
 impl Default for Settings {
@@ -58,6 +63,7 @@ impl Default for Settings {
             max_per_host_concurrency: default_per_host_concurrency(),
             skipped_hosts: Vec::new(),
             state_dir: None,
+            default_output_format: None,
         }
     }
 }

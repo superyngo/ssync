@@ -172,9 +172,18 @@ pub async fn run(
     if let Some(out) = &output.out {
         let rep_summary = ReportSummary {
             total: report_results.len(),
-            success: report_results.iter().filter(|r| r.status == "success").count(),
-            failed: report_results.iter().filter(|r| r.status == "error").count(),
-            skipped: report_results.iter().filter(|r| r.status == "skipped").count(),
+            success: report_results
+                .iter()
+                .filter(|r| r.status == "success")
+                .count(),
+            failed: report_results
+                .iter()
+                .filter(|r| r.status == "error")
+                .count(),
+            skipped: report_results
+                .iter()
+                .filter(|r| r.status == "skipped")
+                .count(),
         };
         let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
         let report = OperationReport {
@@ -186,7 +195,12 @@ pub async fn run(
             results: report_results,
             summary: rep_summary,
         };
-        crate::output::report::write_report(&report, out, "exec")?;
+        crate::output::report::write_report(
+            &report,
+            out,
+            "exec",
+            ctx.config.settings.default_output_format.as_deref(),
+        )?;
     }
 
     Ok(())

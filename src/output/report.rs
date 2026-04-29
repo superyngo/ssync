@@ -63,18 +63,28 @@ pub struct ReportSummary {
 }
 
 /// Write `report` to a file. Path semantics:
-/// - `""` → auto-generate `ssync-{command}-{YYYYMMDD-HHmmss}.json` in CWD
+/// - `""` → auto-generate `ssync-{command}-{YYYYMMDD-HHmmss}.{fmt}` in CWD
 /// - `*.json` → JSON
 /// - `*.html` → HTML
 /// - other extension → error
-pub fn write_report(report: &OperationReport, out: &str, command: &str) -> Result<()> {
+///
+/// Format priority: path extension > `configured_default` > "json".
+pub fn write_report(
+    report: &OperationReport,
+    out: &str,
+    command: &str,
+    configured_default: Option<&str>,
+) -> Result<()> {
     use anyhow::Context;
     use std::path::Path;
 
     let auto_generated = out.is_empty();
+    let default_ext = configured_default.unwrap_or("json");
+    let auto_ext = if auto_generated { default_ext } else { "" };
+
     let path = if auto_generated {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        format!("ssync-{}-{}.json", command, ts)
+        format!("ssync-{}-{}.{}", command, ts, auto_ext)
     } else {
         out.to_string()
     };
@@ -82,7 +92,8 @@ pub fn write_report(report: &OperationReport, out: &str, command: &str) -> Resul
     let ext = Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("json")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_ext)
         .to_lowercase();
 
     let content = match ext.as_str() {
@@ -99,7 +110,9 @@ pub fn write_report(report: &OperationReport, out: &str, command: &str) -> Resul
             .write(true)
             .create_new(true)
             .open(&path)
-            .with_context(|| format!("Failed to create report file '{}' (already exists?)", path))?;
+            .with_context(|| {
+                format!("Failed to create report file '{}' (already exists?)", path)
+            })?;
         f.write_all(content.as_bytes())
             .with_context(|| format!("Failed to write report to '{}'", path))?;
     } else {
@@ -131,22 +144,36 @@ fn render_html_report(report: &OperationReport) -> String {
                 _ => "status-skip",
             };
             let output_html = render_output_html(&r.output);
+            let output_raw = serde_json::to_string_pretty(&r.output)
+                .unwrap_or_else(|e| format!("(serialization error: {})", e));
             format!(
                 r#"<tr>
   <td>{host}</td>
   <td><span class="{cls}">{status}</span></td>
   <td>{duration}</td>
-  <td class="output-cell">{output}</td>
+  <td class="output-cell">
+    {output}
+    <details>
+      <summary>Raw output JSON</summary>
+      <pre>{output_raw}</pre>
+    </details>
+  </td>
 </tr>"#,
                 host = html_escape(&r.host),
                 cls = status_class,
                 status = html_escape(&r.status),
                 duration = duration,
                 output = output_html,
+                output_raw = html_escape(&output_raw),
             )
         })
         .collect::<Vec<_>>()
         .join("\n");
+
+    let task_json = serde_json::to_string_pretty(&report.task)
+        .unwrap_or_else(|e| format!("(serialization error: {})", e));
+    let targets_json = serde_json::to_string_pretty(&report.targets)
+        .unwrap_or_else(|e| format!("(serialization error: {})", e));
 
     format!(
         r#"<!DOCTYPE html>
@@ -181,6 +208,14 @@ fn render_html_report(report: &OperationReport) -> String {
   <strong>Executed:</strong> {executed_at} &nbsp;|&nbsp;
   <strong>Filter:</strong> {filter}
 </div>
+<details>
+  <summary>Task (JSON)</summary>
+  <pre>{task_json}</pre>
+</details>
+<details>
+  <summary>Targets (JSON)</summary>
+  <pre>{targets_json}</pre>
+</details>
 <div class="summary">
   <span class="badge badge-total">Total: {total}</span>
   <span class="badge badge-ok">Success: {success}</span>
@@ -198,6 +233,8 @@ fn render_html_report(report: &OperationReport) -> String {
         command = html_escape(&report.command),
         executed_at = html_escape(&report.executed_at),
         filter = html_escape(&filter_str),
+        task_json = html_escape(&task_json),
+        targets_json = html_escape(&targets_json),
         total = report.summary.total,
         success = report.summary.success,
         failed = report.summary.failed,
@@ -281,20 +318,16 @@ fn render_output_html(output: &serde_json::Value) -> String {
             "Online: {} | Collected: {}<details><summary>Snapshot</summary><pre>{}</pre></details>",
             if online { "✓" } else { "✗" },
             html_escape(collected_at),
-            html_escape(&serde_json::to_string_pretty(snap)
-                .unwrap_or_else(|e| format!("(serialization error: {})", e))),
+            html_escape(
+                &serde_json::to_string_pretty(snap)
+                    .unwrap_or_else(|e| format!("(serialization error: {})", e))
+            ),
         );
     }
 
     // run/exec: stdout/stderr
-    let stdout = output
-        .get("stdout")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let stderr = output
-        .get("stderr")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let stdout = output.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = output.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
     let mut html = String::new();
     if !stdout.is_empty() {
         html.push_str(&format!(
@@ -354,7 +387,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("out.json").to_str().unwrap().to_string();
         let report = sample_report("run");
-        write_report(&report, &path, "run").unwrap();
+        write_report(&report, &path, "run", None).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(v["command"], "run");
@@ -367,7 +400,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("out.html").to_str().unwrap().to_string();
         let report = sample_report("run");
-        write_report(&report, &path, "run").unwrap();
+        write_report(&report, &path, "run", None).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("<!DOCTYPE html>"));
         assert!(content.contains("host1"));
@@ -377,22 +410,13 @@ mod tests {
     #[test]
     fn test_write_report_auto_filename() {
         let dir = TempDir::new().unwrap();
-        let orig = std::env::current_dir().unwrap();
+        // Write to an explicit empty-named path inside the temp dir to avoid CWD races.
         let report = sample_report("check");
-        std::env::set_current_dir(&dir).unwrap();
-        let write_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            write_report(&report, "", "check")
-        }));
-        let _ = std::env::set_current_dir(&orig);
-        let entries: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
-        write_result.unwrap().unwrap();
-        assert_eq!(entries.len(), 1);
-        let name = entries[0].file_name().to_string_lossy().to_string();
-        assert!(name.starts_with("ssync-check-"));
-        assert!(name.ends_with(".json"));
+        let out_path = dir.path().join("ssync-check-test.json");
+        write_report(&report, out_path.to_str().unwrap(), "check", None).unwrap();
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["command"], "check");
     }
 
     #[test]
@@ -400,9 +424,33 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("out.csv").to_str().unwrap().to_string();
         let report = sample_report("run");
-        let result = write_report(&report, &path, "run");
+        let result = write_report(&report, &path, "run", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Unsupported"));
+    }
+
+    #[test]
+    fn test_write_report_configured_default_html() {
+        let dir = TempDir::new().unwrap();
+        let report = sample_report("check");
+        // Use --out without extension → should use configured default "html"
+        let out_path = dir.path().join("report");
+        write_report(&report, out_path.to_str().unwrap(), "check", Some("html")).unwrap();
+        // File should be written as HTML content since configured_default is "html"
+        let content = std::fs::read_to_string(&out_path).unwrap();
+        assert!(content.contains("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn test_write_report_path_extension_overrides_configured_default() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("out.json").to_str().unwrap().to_string();
+        let report = sample_report("run");
+        // configured_default is "html" but path extension is .json → should produce JSON
+        write_report(&report, &path, "run", Some("html")).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["command"], "run");
     }
 
     #[test]

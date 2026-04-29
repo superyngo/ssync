@@ -31,7 +31,7 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
     }
 
     // Set up SSH connection pool (ControlMaster pre-check + concurrency limiter)
-    let (mut pool, _connected) = SshPool::setup(
+    let (pool, _connected) = SshPool::setup(
         &hosts,
         ctx.timeout,
         ctx.concurrency(),
@@ -73,7 +73,6 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
         summary.add_failure(&name, &err);
     }
     let reachable = pool.filter_reachable(&hosts);
-    pool.progress.start_collect(reachable.len());
 
     let mut handles = Vec::new();
     for host in &reachable {
@@ -99,7 +98,6 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
     for handle in handles {
         let (host, result, elapsed) = handle.await?;
         let now = chrono::Utc::now().timestamp();
-        pool.progress.host_collected();
 
         match result {
             Ok(cr) => {
@@ -226,7 +224,6 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
         }
     }
 
-    pool.progress.finish_collect();
     pool.shutdown().await;
 
     summary.print();
@@ -241,8 +238,14 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
             .collect();
         let rep_summary = ReportSummary {
             total: report_results.len(),
-            success: report_results.iter().filter(|r| r.status == "success").count(),
-            failed: report_results.iter().filter(|r| r.status == "error").count(),
+            success: report_results
+                .iter()
+                .filter(|r| r.status == "success")
+                .count(),
+            failed: report_results
+                .iter()
+                .filter(|r| r.status == "error")
+                .count(),
             skipped: 0,
         };
         let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
@@ -255,7 +258,12 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
             results: report_results,
             summary: rep_summary,
         };
-        crate::output::report::write_report(&report, out, "check")?;
+        crate::output::report::write_report(
+            &report,
+            out,
+            "check",
+            ctx.config.settings.default_output_format.as_deref(),
+        )?;
     }
 
     Ok(())

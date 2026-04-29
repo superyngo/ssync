@@ -6,7 +6,6 @@ pub struct SyncProgress {
     is_tty: bool,
     multi: MultiProgress,
     host_bar: Option<ProgressBar>,
-    collect_bar: Option<ProgressBar>,
 }
 
 impl SyncProgress {
@@ -16,7 +15,6 @@ impl SyncProgress {
             is_tty,
             multi: MultiProgress::new(),
             host_bar: None,
-            collect_bar: None,
         }
     }
 
@@ -48,31 +46,6 @@ impl SyncProgress {
         }
     }
 
-    pub fn start_collect(&mut self, total: usize) {
-        if !self.is_tty {
-            return;
-        }
-        let style = ProgressStyle::default_bar()
-            .template(" {prefix:>12} {bar:30.green/dim} {pos}/{len} {msg}")
-            .expect("valid template");
-        let bar = self.multi.add(ProgressBar::new(total as u64));
-        bar.set_style(style);
-        bar.set_prefix("Collecting");
-        self.collect_bar = Some(bar);
-    }
-
-    pub fn host_collected(&self) {
-        if let Some(bar) = &self.collect_bar {
-            bar.inc(1);
-        }
-    }
-
-    pub fn finish_collect(&mut self) {
-        if let Some(bar) = self.collect_bar.take() {
-            bar.finish();
-        }
-    }
-
     pub fn clear(&self) {
         if !self.is_tty {
             return;
@@ -96,11 +69,6 @@ mod tests {
         progress.host_checked(1, 0);
         progress.host_checked(2, 1);
         progress.finish_host_check(2, 1);
-
-        progress.start_collect(3);
-        progress.host_collected();
-        progress.host_collected();
-        progress.finish_collect();
 
         progress.clear();
     }

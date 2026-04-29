@@ -46,7 +46,8 @@ pub async fn collect_pooled(
                 Ok(output) if output.success => {
                     metrics_raw_stdout = output.stdout;
                     metrics_raw_stderr = output.stderr;
-                    let parsed = super::parser::parse_batch(host.shell, enabled, &metrics_raw_stdout);
+                    let parsed =
+                        super::parser::parse_batch(host.shell, enabled, &metrics_raw_stdout);
                     for metric in enabled {
                         if let Some(value) = parsed.get(metric) {
                             result.insert(metric.clone(), value.clone());
@@ -62,7 +63,8 @@ pub async fn collect_pooled(
                     // Partial: try to parse what we got even if exit code non-zero
                     metrics_raw_stdout = output.stdout;
                     metrics_raw_stderr = output.stderr;
-                    let parsed = super::parser::parse_batch(host.shell, enabled, &metrics_raw_stdout);
+                    let parsed =
+                        super::parser::parse_batch(host.shell, enabled, &metrics_raw_stdout);
                     for metric in enabled {
                         if let Some(value) = parsed.get(metric) {
                             result.insert(metric.clone(), value.clone());

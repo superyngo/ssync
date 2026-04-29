@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CLI short flags were reassigned for consistency: `--shell/-s`, `run|exec --sudo/-S`, and `sync --source/-S`
+- HTML report output now includes top-level `task` and `targets` JSON sections plus per-host raw `output` JSON, matching JSON report information density
+
 ## [v0.7.3] - 2026-04-28
 
 ### Fixed

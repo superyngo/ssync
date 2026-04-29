@@ -104,7 +104,15 @@ async fn main() -> Result<()> {
             output,
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::sync::run(&ctx, dry_run, &files, no_push_missing, source.as_deref(), &output).await
+            commands::sync::run(
+                &ctx,
+                dry_run,
+                &files,
+                no_push_missing,
+                source.as_deref(),
+                &output,
+            )
+            .await
         }
         Commands::Run {
             target,

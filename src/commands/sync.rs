@@ -71,7 +71,9 @@ pub async fn run(
     let mut summary = SyncSummary::default();
 
     for host in &hosts {
-        host_file_map.entry(host.name.clone()).or_insert((Vec::new(), Vec::new()));
+        host_file_map
+            .entry(host.name.clone())
+            .or_insert((Vec::new(), Vec::new()));
     }
 
     // Step 1: Collect all file paths, separating recursive from non-recursive.
@@ -105,14 +107,16 @@ pub async fn run(
         super::TargetMode::All => "global".to_string(),
         super::TargetMode::Groups(g) => g.join(", "),
         super::TargetMode::Hosts(h) => h.join(", "),
-        super::TargetMode::Shell(s) => {
-            s.iter().map(|sh| sh.to_string()).collect::<Vec<_>>().join(", ")
-        }
+        super::TargetMode::Shell(s) => s
+            .iter()
+            .map(|sh| sh.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
     };
     println!("\n── Sync: {} ──", label);
 
     // Step 2: Pre-check SSH connections via SshPool (with SCP probe)
-    let (mut pool, _connected) = SshPool::setup_with_options(
+    let (pool, _connected) = SshPool::setup_with_options(
         &hosts,
         ctx.timeout,
         ctx.concurrency(),
@@ -252,11 +256,7 @@ pub async fn run(
     {
         let no_source_paths: Vec<String> = all_paths
             .iter()
-            .filter(|p| {
-                path_source_map
-                    .get(p.as_str())
-                    .is_none_or(|s| s.is_none())
-            })
+            .filter(|p| path_source_map.get(p.as_str()).is_none_or(|s| s.is_none()))
             .cloned()
             .collect();
 
@@ -322,7 +322,6 @@ pub async fn run(
 
     // Step 4: Batch collect metadata for non-recursive files
     if !all_paths.is_empty() {
-        pool.progress.start_collect(reachable_hosts.len());
         let batch_result = batch_collect_all_metadata(
             &reachable_hosts,
             &all_paths,
@@ -331,7 +330,6 @@ pub async fn run(
             &pool.session_pool,
         )
         .await?;
-        pool.progress.finish_collect();
 
         // Step 5: Make decisions per file
         let mut all_decisions: Vec<SyncDecision> = Vec::new();
@@ -413,7 +411,11 @@ pub async fn run(
                     printer::print_host_line("passed", "ok", &d.synced_hosts.join(", "));
                 }
                 for h in &d.synced_hosts {
-                    host_file_map.entry(h.clone()).or_default().1.push(d.path.clone());
+                    host_file_map
+                        .entry(h.clone())
+                        .or_default()
+                        .1
+                        .push(d.path.clone());
                 }
             }
             if !all_decisions.is_empty() {
@@ -485,10 +487,18 @@ pub async fn run(
                             &failed_uploads,
                         );
                         for target in &succeeded {
-                            host_file_map.entry(target.clone()).or_default().0.push(decision.path.clone());
+                            host_file_map
+                                .entry(target.clone())
+                                .or_default()
+                                .0
+                                .push(decision.path.clone());
                         }
                         for h in &decision.synced_hosts {
-                            host_file_map.entry(h.clone()).or_default().1.push(decision.path.clone());
+                            host_file_map
+                                .entry(h.clone())
+                                .or_default()
+                                .1
+                                .push(decision.path.clone());
                         }
                     }
                     Err(e) => {
@@ -610,10 +620,7 @@ pub async fn run(
         let report_results: Vec<HostResult> = host_names
             .iter()
             .map(|h| {
-                let (synced, skipped) = host_file_map
-                    .get(h)
-                    .cloned()
-                    .unwrap_or_default();
+                let (synced, skipped) = host_file_map.get(h).cloned().unwrap_or_default();
                 HostResult {
                     host: h.clone(),
                     status: "success".to_string(),
@@ -643,7 +650,12 @@ pub async fn run(
             results: report_results,
             summary: rep_summary,
         };
-        crate::output::report::write_report(&report, out, "sync")?;
+        crate::output::report::write_report(
+            &report,
+            out,
+            "sync",
+            ctx.config.settings.default_output_format.as_deref(),
+        )?;
     }
 
     Ok(())
@@ -1964,7 +1976,10 @@ mod tests {
         assert!(cmd.contains("[ -d"));
         assert!(cmd.contains("-maxdepth 1"));
         assert!(cmd.contains("find"));
-        assert!(cmd.contains("find -L"), "find must use -L to follow symlinks");
+        assert!(
+            cmd.contains("find -L"),
+            "find must use -L to follow symlinks"
+        );
         assert!(cmd.contains("mydir"));
         assert!(cmd.contains("single.conf"));
     }
@@ -1975,7 +1990,10 @@ mod tests {
         let cmd = build_dir_expand_cmd(&paths, true, ShellType::Sh);
         assert!(cmd.contains("---PATH:"));
         assert!(cmd.contains("find"));
-        assert!(cmd.contains("find -L"), "find must use -L to follow symlinks");
+        assert!(
+            cmd.contains("find -L"),
+            "find must use -L to follow symlinks"
+        );
         assert!(
             !cmd.contains("-maxdepth"),
             "recursive should not have maxdepth"
@@ -2082,10 +2100,7 @@ mod tests {
     #[test]
     fn test_union_dir_expansions_empty_on_one_host() {
         // If one host sees an empty directory and another sees files, union has those files
-        let host_a = HashMap::from([(
-            "~/bin".to_string(),
-            DirExpandResult::Directory(vec![]),
-        )]);
+        let host_a = HashMap::from([("~/bin".to_string(), DirExpandResult::Directory(vec![]))]);
         let host_b = HashMap::from([(
             "~/bin".to_string(),
             DirExpandResult::Directory(vec!["~/bin/tool".to_string()]),

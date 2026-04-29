@@ -37,7 +37,7 @@ pub struct TargetArgs {
     pub all: bool,
 
     /// Filter by remote shell type (comma-separated: sh, powershell, cmd)
-    #[arg(short = 'S', long, value_delimiter = ',')]
+    #[arg(short = 's', long, value_delimiter = ',')]
     pub shell: Vec<crate::config::schema::ShellType>,
 
     /// Execute sequentially instead of in parallel
@@ -114,10 +114,6 @@ pub enum Commands {
 
         #[command(flatten)]
         output: OutputArgs,
-
-        /// Print help
-        #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
-        help: Option<bool>,
     },
 
     /// Synchronize files across hosts using collect-decide-distribute model
@@ -139,7 +135,7 @@ pub enum Commands {
         no_push_missing: bool,
 
         /// Use a specific host as file source (bypasses auto-detection)
-        #[arg(short = 's', long)]
+        #[arg(short = 'S', long)]
         source: Option<String>,
 
         #[command(flatten)]
@@ -156,7 +152,7 @@ pub enum Commands {
         command: String,
 
         /// Run with sudo
-        #[arg(short, long)]
+        #[arg(short = 'S', long)]
         sudo: bool,
 
         /// Auto-respond yes to interactive prompts (serial mode only)
@@ -177,7 +173,7 @@ pub enum Commands {
         script: String,
 
         /// Run with sudo
-        #[arg(short, long)]
+        #[arg(short = 'S', long)]
         sudo: bool,
 
         /// Auto-respond yes to interactive prompts (serial mode only)

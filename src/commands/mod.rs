@@ -237,7 +237,7 @@ fn resolve_target_mode(target: &TargetArgs, config: &AppConfig) -> Result<Target
 
     if count == 0 {
         let mut hint = String::from(
-            "Target required. Use --group/-g, --host/-h, --shell/-S, or --all/-a to specify targets.",
+            "Target required. Use --group/-g, --host/-h, --shell/-s, or --all/-a to specify targets.",
         );
         if config.host.is_empty() {
             hint.push_str("\nHint: Run 'ssync init' first to import hosts from ~/.ssh/config.");
@@ -248,7 +248,7 @@ fn resolve_target_mode(target: &TargetArgs, config: &AppConfig) -> Result<Target
     }
 
     if count > 1 {
-        bail!("Only one of --all/-a, --host/-h, --group/-g, or --shell/-S can be used at a time.");
+        bail!("Only one of --all/-a, --host/-h, --group/-g, or --shell/-s can be used at a time.");
     }
 
     if has_all {

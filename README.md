@@ -80,6 +80,9 @@ ssync sync --all --dry-run
 # Sync specific files
 ssync sync --all -f /etc/hosts,/etc/resolv.conf
 
+# Use fixed source host
+ssync sync --all -S host1
+
 # Don't push to hosts missing files
 ssync sync --all --no-push-missing
 ```
@@ -93,7 +96,7 @@ Execute commands on remote hosts:
 ssync run --all "uptime"
 
 # Run with sudo
-ssync run --all "apt update" --sudo
+ssync run --all "apt update" -S
 
 # Auto-confirm prompts (serial mode)
 ssync run --all "systemctl restart nginx" --yes
@@ -108,7 +111,7 @@ Upload and execute local scripts:
 ssync exec --all ./deploy.sh
 
 # Execute with sudo
-ssync exec --all ./install.sh --sudo
+ssync exec --all ./install.sh -S
 
 # Keep remote script after execution
 ssync exec --all ./script.sh --keep
@@ -125,11 +128,8 @@ View historical data and generate reports:
 # Interactive TUI
 ssync checkout --all
 
-# Table format
-ssync checkout --all --format table
-
 # HTML report
-ssync checkout --all --format html --out report.html
+ssync checkout --all --out report.html
 
 # Show trend history
 ssync checkout --all --history
@@ -176,6 +176,7 @@ All commands that operate on remote hosts support the following target options:
 | `-a, --all` | Target all configured hosts |
 | `-g, --group` | Target hosts by group (comma-separated) |
 | `-h, --host` | Target specific hosts (comma-separated) |
+| `-s, --shell` | Target hosts by detected shell type (`sh`, `powershell`, `cmd`) |
 | `--serial` | Execute sequentially instead of in parallel |
 | `--timeout` | Connection timeout in seconds |
 
@@ -190,6 +191,7 @@ Example configuration:
 default_timeout = 30
 max_concurrency = 10
 state_dir = "~/.local/share/ssync"
+# default_output_format = "html"   # json (default) or html
 
 [[host]]
 name = "server1"

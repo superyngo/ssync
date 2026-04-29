@@ -1,8 +1,8 @@
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSummary};
 use super::Context;
+use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSummary};
 
 /// Snapshot row from the database.
 #[allow(dead_code)]
@@ -76,8 +76,14 @@ pub async fn run(
 
         let rep_summary = ReportSummary {
             total: report_results.len(),
-            success: report_results.iter().filter(|r| r.status == "success").count(),
-            failed: report_results.iter().filter(|r| r.status == "error").count(),
+            success: report_results
+                .iter()
+                .filter(|r| r.status == "success")
+                .count(),
+            failed: report_results
+                .iter()
+                .filter(|r| r.status == "error")
+                .count(),
             skipped: 0,
         };
         let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
@@ -94,7 +100,12 @@ pub async fn run(
             results: report_results,
             summary: rep_summary,
         };
-        crate::output::report::write_report(&report, out, "checkout")?;
+        crate::output::report::write_report(
+            &report,
+            out,
+            "checkout",
+            ctx.config.settings.default_output_format.as_deref(),
+        )?;
     }
 
     Ok(())
