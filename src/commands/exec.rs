@@ -18,7 +18,9 @@ pub async fn run(
     _yes: bool,
     keep: bool,
     dry_run: bool,
+    output: &crate::cli::OutputArgs,
 ) -> Result<()> {
+    let _ = output; // wired in Task 7
     let script_path = Path::new(script);
     if !script_path.exists() {
         bail!("Script not found: {}", script);

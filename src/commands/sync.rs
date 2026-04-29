@@ -57,7 +57,9 @@ pub async fn run(
     files: &[String],
     no_push_missing: bool,
     cli_source: Option<&str>,
+    output: &crate::cli::OutputArgs,
 ) -> Result<()> {
+    let _ = output; // wired in Task 9
     let push_missing = !no_push_missing;
     let hosts = ctx.resolve_hosts()?;
     let mut summary = SyncSummary::default();

@@ -53,6 +53,16 @@ pub struct TargetArgs {
     pub help: Option<bool>,
 }
 
+/// Output arguments for writing structured reports to file.
+#[derive(Args, Clone, Debug, Default)]
+pub struct OutputArgs {
+    /// Write structured report to file (.json or .html).
+    /// Omit path for auto-named file: ssync-{command}-{YYYYMMDD-HHmmss}.json
+    /// Examples: --out  |  --out report.json  |  --out report.html
+    #[arg(short = 'o', long, num_args = 0..=1, default_missing_value = "")]
+    pub out: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Import hosts from ~/.ssh/config and detect remote shell types
@@ -84,6 +94,8 @@ pub enum Commands {
     Check {
         #[command(flatten)]
         target: TargetArgs,
+        #[command(flatten)]
+        output: OutputArgs,
     },
 
     /// View historical data and generate reports from state DB
@@ -99,6 +111,9 @@ pub enum Commands {
         /// History start point (e.g. "2025-01-01" or "7d")
         #[arg(long)]
         since: Option<String>,
+
+        #[command(flatten)]
+        output: OutputArgs,
 
         /// Print help
         #[arg(short = 'H', long, action = clap::ArgAction::HelpLong)]
@@ -126,6 +141,9 @@ pub enum Commands {
         /// Use a specific host as file source (bypasses auto-detection)
         #[arg(short = 's', long)]
         source: Option<String>,
+
+        #[command(flatten)]
+        output: OutputArgs,
     },
 
     /// Execute a command string on remote hosts
@@ -144,6 +162,9 @@ pub enum Commands {
         /// Auto-respond yes to interactive prompts (serial mode only)
         #[arg(short, long)]
         yes: bool,
+
+        #[command(flatten)]
+        output: OutputArgs,
     },
 
     /// Upload and execute a local script on remote hosts
@@ -170,6 +191,9 @@ pub enum Commands {
         /// Preview without executing
         #[arg(long)]
         dry_run: bool,
+
+        #[command(flatten)]
+        output: OutputArgs,
     },
 
     /// Open config file in $EDITOR

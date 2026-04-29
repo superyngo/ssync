@@ -81,18 +81,19 @@ async fn main() -> Result<()> {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
             commands::list::run(&ctx).await
         }
-        Commands::Check { target } => {
+        Commands::Check { target, output } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::check::run(&ctx).await
+            commands::check::run(&ctx, &output).await
         }
         Commands::Checkout {
             target,
             history,
             since,
+            output,
             ..
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::checkout::run(&ctx, history, since).await
+            commands::checkout::run(&ctx, history, since, &output).await
         }
         Commands::Sync {
             target,
@@ -100,18 +101,20 @@ async fn main() -> Result<()> {
             files,
             no_push_missing,
             source,
+            output,
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::sync::run(&ctx, dry_run, &files, no_push_missing, source.as_deref()).await
+            commands::sync::run(&ctx, dry_run, &files, no_push_missing, source.as_deref(), &output).await
         }
         Commands::Run {
             target,
             command,
             sudo,
             yes,
+            output,
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::run::run(&ctx, &command, sudo, yes).await
+            commands::run::run(&ctx, &command, sudo, yes, &output).await
         }
         Commands::Exec {
             target,
@@ -120,9 +123,10 @@ async fn main() -> Result<()> {
             yes,
             keep,
             dry_run,
+            output,
         } => {
             let ctx = commands::Context::new(cli.verbose, &target, cfg).await?;
-            commands::exec::run(&ctx, &script, sudo, yes, keep, dry_run).await
+            commands::exec::run(&ctx, &script, sudo, yes, keep, dry_run, &output).await
         }
         Commands::Log {
             last,

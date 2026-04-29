@@ -15,7 +15,8 @@ use super::{Context, TargetMode};
 /// Per-host check configuration: (enabled_metrics, check_paths).
 type HostCheckConfig = (Vec<String>, Vec<(String, String)>);
 
-pub async fn run(ctx: &Context) -> Result<()> {
+pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
+    let _ = output; // wired in Task 8
     let hosts = ctx.resolve_hosts()?;
 
     // Build per-host check config: each host gets its own (enabled, check_paths).

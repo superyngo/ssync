@@ -38,7 +38,9 @@ pub async fn run(
     ctx: &Context,
     _history: bool,
     _since: Option<String>,
+    output: &crate::cli::OutputArgs,
 ) -> Result<()> {
+    let _ = output; // wired in Task 10
     let hosts = ctx.resolve_hosts()?;
     let host_names: Vec<&str> = hosts.iter().map(|h| h.name.as_str()).collect();
     let columns = DisplayColumns::from_context(ctx);

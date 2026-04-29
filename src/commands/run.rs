@@ -9,7 +9,8 @@ use crate::output::summary::Summary;
 
 use super::Context;
 
-pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool) -> Result<()> {
+pub async fn run(ctx: &Context, command: &str, sudo: bool, _yes: bool, output: &crate::cli::OutputArgs) -> Result<()> {
+    let _ = output; // wired in Task 6
     let hosts = ctx.resolve_hosts()?;
 
     // Set up SSH connection pool
