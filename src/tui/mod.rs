@@ -10,6 +10,8 @@ pub mod app;
 pub mod components;
 pub mod entry;
 pub mod event;
+pub mod focus;
+pub mod state;
 pub mod tabs;
 pub mod terminal;
 pub mod theme;
