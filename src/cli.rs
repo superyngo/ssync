@@ -6,7 +6,9 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "ssync",
     version,
-    about = "SSH-config-based cross-platform remote management tool"
+    about = "SSH-config-based cross-platform remote management tool",
+    subcommand_required = false,
+    arg_required_else_help = false,
 )]
 pub struct Cli {
     /// Enable verbose output
@@ -18,7 +20,7 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 /// Common target selection arguments for commands that operate on remote hosts.

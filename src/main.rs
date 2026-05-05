@@ -5,10 +5,27 @@ mod host;
 mod metrics;
 mod output;
 mod state;
+#[cfg(feature = "tui")]
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
+
+/// Returns true if the current binary was invoked as `ssync-tui`.
+/// Per AD-17, only `ssync-tui` is allowed to enter alternate screen.
+#[cfg(feature = "tui")]
+fn binary_is_ssync_tui() -> bool {
+    std::env::args_os()
+        .next()
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_stem()
+                .map(|s| s.to_owned())
+        })
+        .map(|s| s == "ssync-tui")
+        .unwrap_or(false)
+}
 
 /// Enable ANSI escape code support on Windows terminals.
 /// Modern Windows 10+ supports ANSI via Virtual Terminal Processing,
@@ -38,7 +55,7 @@ fn enable_ansi_support() {}
 /// If RUST_LOG is set, respect it entirely. Otherwise apply defaults:
 /// - Verbose mode: DEBUG level to see all logs
 /// - Normal mode: INFO level with suppressed russh/zeroize noise (VirtualLock warnings)
-fn init_tracing(verbose: bool) {
+fn init_tracing(verbose: bool, silent: bool) {
     use tracing_subscriber::{fmt, EnvFilter};
 
     // If RUST_LOG is set, respect it entirely.
@@ -52,7 +69,19 @@ fn init_tracing(verbose: bool) {
         EnvFilter::new("russh=error,russh_keys=error,ssh_key=error,zeroize=error,info")
     };
 
-    fmt().with_env_filter(filter).with_target(false).init();
+    // When `silent` is set (TUI mode), discard log output so it does not leak
+    // through the alternate screen. AD-15 calls for an in-memory ring buffer
+    // here; the L-key overlay (Phase 7) is post-MVP, so for Phase 1a we just
+    // sink the writer.
+    if silent {
+        fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::sink)
+            .init();
+    } else {
+        fmt().with_env_filter(filter).with_target(false).init();
+    }
 }
 
 #[tokio::main]
@@ -60,12 +89,33 @@ async fn main() -> Result<()> {
     enable_ansi_support();
     let cli = Cli::parse();
 
-    // Initialize tracing
-    init_tracing(cli.verbose);
+    // Detect TUI launch path before initialising tracing so we can route
+    // log output to a sink when the alternate screen will be active.
+    #[cfg(feature = "tui")]
+    let tui_silent = cli.command.is_none() && binary_is_ssync_tui();
+    #[cfg(not(feature = "tui"))]
+    let tui_silent = false;
+
+    init_tracing(cli.verbose, tui_silent);
 
     let cfg = cli.config.as_deref();
 
-    match cli.command {
+    let command = match cli.command {
+        Some(c) => c,
+        None => {
+            // No subcommand. Per AD-17, only ssync-tui binary may enter TUI.
+            #[cfg(feature = "tui")]
+            {
+                if binary_is_ssync_tui() {
+                    return tui::entry::run_or_fallback(cli.verbose, cfg).await;
+                }
+            }
+            eprintln!("Interactive TUI not available. Use the `ssync-tui` binary.");
+            std::process::exit(1);
+        }
+    };
+
+    match command {
         Commands::Init {
             update,
             dry_run,

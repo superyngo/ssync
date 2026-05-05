@@ -308,7 +308,7 @@ fn extract_ip_address(data: &serde_json::Value) -> String {
 }
 
 /// Extract a generic metric value as a display string.
-fn extract_metric_value(data: &serde_json::Value, metric: &str) -> (String, bool) {
+pub(crate) fn extract_metric_value(data: &serde_json::Value, metric: &str) -> (String, bool) {
     match metric {
         "cpu_load" => (extract_cpu_load(data), false),
         "memory" => extract_memory(data),
@@ -370,7 +370,7 @@ fn extract_metric_value(data: &serde_json::Value, metric: &str) -> (String, bool
 }
 
 /// Map metric name to a human-readable column header.
-fn metric_header(metric: &str) -> &str {
+pub(crate) fn metric_header(metric: &str) -> &str {
     match metric {
         "cpu_load" => "CPU Load",
         "memory" => "Memory",
@@ -386,7 +386,7 @@ fn metric_header(metric: &str) -> &str {
 }
 
 /// Column width for a metric.
-fn metric_width(metric: &str) -> usize {
+pub(crate) fn metric_width(metric: &str) -> usize {
     match metric {
         "ip_address" => 18,
         "system_info" => 20,
@@ -433,94 +433,3 @@ fn print_table_report(snapshots: &[HostSnapshot], columns: &DisplayColumns) {
     }
 }
 
-#[cfg(feature = "tui")]
-fn run_tui(snapshots: &[HostSnapshot], columns: &DisplayColumns) -> Result<()> {
-    use crossterm::{
-        event::{self, Event, KeyCode},
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-        ExecutableCommand,
-    };
-    use ratatui::{prelude::*, widgets::*};
-    use std::io::stdout;
-
-    enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-
-    // Build header and constraints dynamically
-    let mut header_cells: Vec<&str> = vec!["Host", "Status"];
-    let mut constraints: Vec<Constraint> = vec![Constraint::Length(16), Constraint::Length(12)];
-    for metric in &columns.metrics {
-        header_cells.push(metric_header(metric));
-        constraints.push(Constraint::Length(metric_width(metric) as u16));
-    }
-    header_cells.push("Last Seen");
-    constraints.push(Constraint::Min(10));
-
-    loop {
-        terminal.draw(|frame| {
-            let area = frame.area();
-
-            let mut rows = Vec::new();
-            for snap in snapshots {
-                let status = if snap.online {
-                    "✓ online"
-                } else {
-                    "✗ offline"
-                };
-                let last_seen = format_relative_time(snap.last_online);
-
-                let status_style = if snap.online {
-                    Style::new().fg(Color::Green)
-                } else {
-                    Style::new().fg(Color::Red)
-                };
-
-                let mut cells = vec![
-                    Cell::from(snap.host.clone()),
-                    Cell::from(status.to_string()).style(status_style),
-                ];
-
-                for metric in &columns.metrics {
-                    let (val, critical) = extract_metric_value(&snap.data, metric);
-                    let style = if critical {
-                        Style::new().fg(Color::Red)
-                    } else {
-                        Style::default()
-                    };
-                    cells.push(Cell::from(val).style(style));
-                }
-
-                cells.push(Cell::from(last_seen));
-                rows.push(Row::new(cells));
-            }
-
-            let table = Table::new(rows, &constraints)
-                .header(
-                    Row::new(
-                        header_cells
-                            .clone()
-                            .into_iter()
-                            .map(|h| h.to_string())
-                            .collect::<Vec<_>>(),
-                    )
-                    .style(Style::new().bold()),
-                )
-                .block(Block::bordered().title(" ssync checkout — press q to quit "));
-
-            frame.render_widget(table, area);
-        })?;
-
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') || key.code == KeyCode::Esc {
-                    break;
-                }
-            }
-        }
-    }
-
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
-    Ok(())
-}
