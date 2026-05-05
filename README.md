@@ -8,7 +8,7 @@ SSH-config-based cross-platform remote management tool.
 - **System Snapshots**: Collect and store system information for historical tracking
 - **File Synchronization**: Sync files across multiple hosts using collect-decide-distribute model
 - **Remote Execution**: Run commands or scripts on multiple hosts in parallel
-- **TUI Interface**: Interactive terminal UI for viewing historical data and trends
+- **TUI Interface**: Interactive terminal UI (`ssync-tui`) for browsing snapshot data, configuring filters, and running checks
 
 ## Installation
 
@@ -31,6 +31,41 @@ git clone https://github.com/superyngo/ssync.git
 cd ssync
 cargo install --path .
 ```
+
+## Binaries
+
+Two binaries are produced. Source builds default to headless; release downloads include both.
+
+| Binary | Built with | What it does |
+|--------|-----------|--------------|
+| `ssync` | always | All CLI subcommands. Invoked without a subcommand → prints "Interactive TUI not available" and exits 1. |
+| `ssync-tui` | `--features tui` | Interactive TUI when launched on a TTY. All CLI subcommands also work. Piped or under `TERM=dumb` → prints help and exits 2. |
+
+```bash
+cargo build --bin ssync                            # headless
+cargo build --bin ssync-tui --features tui         # TUI build
+```
+
+> Running multiple `ssync-tui` instances against the same config simultaneously
+> is not supported; they share a single state file with last-write-wins
+> semantics.
+
+## TUI keybindings (Phase 3 / MVP)
+
+| Scope | Key | Action |
+|-------|-----|--------|
+| Global | `1` / `2` / `3` | Switch to Config / Operate / Checkout |
+| Global | `Tab` / `Shift+Tab` | Cycle to next / previous tab |
+| Global | `q` | Quit (state saved) |
+| Global | `Ctrl+C` | Quit immediately (state saved; cancels running op) |
+| Global | `Esc` | Close popup / clear error / cancel running op |
+| Global | `?` | Toggle keybindings help popup |
+| Global | `i` | Toggle contextual info popup |
+| Operate | `↑` / `↓` (or `j`/`k`) | Move between Target row and `[Execute]` |
+| Operate | `f` | Open Target Filter popup |
+| Operate | `Enter` on `[Execute]` | Run the `check` operation |
+| Checkout | `↑` `↓` `j` `k` | Move row selection |
+| Checkout | `PgUp` `PgDn` `Home` `End` | Page / jump navigation |
 
 ## Usage
 

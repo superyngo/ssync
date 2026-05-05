@@ -7,6 +7,7 @@
 //! See `docs/tui_reconstruct_plan.md` for the design spec.
 
 pub mod app;
+pub mod async_bridge;
 pub mod components;
 pub mod entry;
 pub mod event;

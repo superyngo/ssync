@@ -3,28 +3,44 @@
 ## Build, Test, and Quality Commands
 
 ```bash
-# Build
-cargo build
-cargo build --no-default-features  # Build without TUI feature
-cargo build --release               # Release build
+# Build (two binaries: ssync and ssync-tui)
+cargo build                                       # ssync only (headless; default)
+cargo build --bin ssync-tui --features tui        # TUI binary
+cargo build --release --bin ssync                 # Release headless
+cargo build --release --bin ssync-tui --features tui  # Release TUI
 
 # Check without building (faster)
 cargo check
+cargo check --features tui
 
-# Run tests
+# Run tests (both feature configurations must pass)
 cargo test
-cargo test test_name                # Run single test
-cargo test config::ssh_config::tests # Run module tests
-cargo test -- --nocapture           # Show print! output
+cargo test --features tui
+cargo test test_name                              # Run single test
+cargo test -- --nocapture                         # Show print! output
 
-# Linting
-cargo clippy
-cargo clippy --all-targets          # Lint tests too
+# Linting (run for both feature configs)
+cargo clippy --all-targets
+cargo clippy --all-targets --features tui
 
 # Formatting
 cargo fmt
-cargo fmt --check                   # Check formatting
+cargo fmt --check
 ```
+
+## TUI contributor rules (per docs/tui_reconstruct_plan.md §7.3)
+
+- No `eprintln!` / `println!` / `print!` / `eprint!` anywhere in `src/tui/`
+  or in any code path reachable while the TUI is running. Use `tracing`
+  macros (`error!`, `warn!`, `debug!`) instead.
+- `commands::*_core` functions must never call `output::printer`. They
+  receive a `ProgressSink` impl or return a `CommandReport` variant;
+  printing is the CLI wrapper's responsibility.
+- Each phase merges into `feat/tui` only after `cargo test`,
+  `cargo test --features tui`, `cargo clippy --all-targets`,
+  `cargo clippy --all-targets --features tui`, and `cargo fmt --check`
+  all pass. To revert a regression, revert the merge commit on
+  `feat/tui` — the branch history is the rollback.
 
 ## Code Style Guidelines
 
