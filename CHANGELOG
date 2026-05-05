@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 2026-05-06
+
+- **feat(tui): Phase 4 — Config tab read-only view + external editor** (`e` opens `$EDITOR`/`$VISUAL`/`vi`; TUI suspends and resumes after exit; config file reloads on return). Scrollable via ↑↓/jk/PgUp/PgDn/Home/End with line numbers.
+
 ## v0.8.0 (2026-04-29)
 
 - **feat(config):** Add `default_output_format` to `[settings]` — sets default report format (json/html) when `--out` path has no extension. Priority: path extension > config setting > json.

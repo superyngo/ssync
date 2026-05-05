@@ -4,13 +4,19 @@
 //! Config/Operate placeholders, minimal Checkout host table, status bar
 //! with red `app.error`, terminal-size guard, minimal `?` help popup,
 //! signal handlers (SIGHUP/SIGTERM on Unix, ctrl_c on Windows).
+//!
+//! Phase 4: Config tab — read-only scrollable view + external editor launch.
 
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    execute,
+    terminal,
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -61,6 +67,9 @@ pub struct App {
     pub checkout_columns: DisplayColumns,
     pub config: AppConfig,
     pub config_path: Option<PathBuf>,
+    /// Raw lines of the config file for the Config tab display.
+    config_lines: Vec<String>,
+    config_viewport: Viewport,
     pub state_file_path: PathBuf,
     pub target_filter: TargetFilterState,
     pub filter_popup: Option<FilterPopup>,
@@ -108,6 +117,9 @@ impl App {
 
         let active_tab = persisted.tui_state.active_tab.to_tab_id();
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let config_lines = load_config_lines(ctx.config_path.as_deref());
+        let mut config_viewport = Viewport::new();
+        config_viewport.set_dims(config_lines.len(), 0);
         let timeout = if persisted.target_filter.timeout > 0 {
             persisted.target_filter.timeout
         } else {
@@ -126,6 +138,8 @@ impl App {
             checkout_columns: columns,
             config: ctx.config.clone(),
             config_path: ctx.config_path.clone(),
+            config_lines,
+            config_viewport,
             state_file_path,
             target_filter: persisted.target_filter,
             filter_popup: None,
@@ -483,6 +497,34 @@ impl App {
                 self.info_open = true;
                 Ok(true)
             }
+            KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Config => {
+                self.config_viewport.move_up();
+                Ok(true)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Config => {
+                self.config_viewport.move_down();
+                Ok(true)
+            }
+            KeyCode::PageUp if self.active_tab == TabId::Config => {
+                self.config_viewport.page_up();
+                Ok(true)
+            }
+            KeyCode::PageDown if self.active_tab == TabId::Config => {
+                self.config_viewport.page_down();
+                Ok(true)
+            }
+            KeyCode::Home if self.active_tab == TabId::Config => {
+                self.config_viewport.home();
+                Ok(true)
+            }
+            KeyCode::End if self.active_tab == TabId::Config => {
+                self.config_viewport.end();
+                Ok(true)
+            }
+            KeyCode::Char('e') if self.active_tab == TabId::Config => {
+                self.open_in_editor();
+                Ok(true)
+            }
             KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Operate => {
                 self.operate_focus = OperateFocus::TargetRow;
                 Ok(true)
@@ -591,11 +633,7 @@ impl App {
 
         self.render_tab_bar(chunks[0], frame);
         match self.active_tab {
-            TabId::Config => self.render_placeholder(
-                chunks[1],
-                frame,
-                "Config — available in Phase 4",
-            ),
+            TabId::Config => self.render_config(chunks[1], frame),
             TabId::Operate => self.render_operate(chunks[1], frame),
             TabId::Checkout => {
                 self.maybe_reload_checkout();
@@ -641,12 +679,86 @@ impl App {
         frame.render_widget(tabs, area);
     }
 
-    fn render_placeholder(&self, area: Rect, frame: &mut ratatui::Frame, text: &str) {
-        let p = Paragraph::new(text)
-            .style(Style::default().fg(self.theme.inactive))
-            .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(p, area);
+    fn render_config(&mut self, area: Rect, frame: &mut ratatui::Frame) {
+        let path_display = self
+            .config_path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "~/.config/ssync/config.toml".to_string());
+        let title = format!(" Config — {}  (e:edit) ", path_display);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.accent_config))
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        if self.config_lines.is_empty() {
+            let p = Paragraph::new("Config file not found or empty.")
+                .style(Style::default().fg(self.theme.inactive))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(p, inner);
+            return;
+        }
+
+        let visible_height = inner.height as usize;
+        self.config_viewport.set_dims(self.config_lines.len(), visible_height);
+
+        let (start, end) = self.config_viewport.visible_range();
+        let line_num_width = format!("{}", self.config_lines.len()).len();
+        let lines: Vec<Line> = self.config_lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, raw)| {
+                let lineno = start + i + 1;
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>width$} ", lineno, width = line_num_width),
+                        Style::default().fg(self.theme.inactive),
+                    ),
+                    Span::raw(raw.clone()),
+                ])
+            })
+            .collect();
+        let p = Paragraph::new(lines);
+        frame.render_widget(p, inner);
+    }
+
+    /// Suspend the TUI, open the config file in `$EDITOR` (or `vi`), then
+    /// resume the TUI and reload the config lines.
+    fn open_in_editor(&mut self) {
+        if self.running_op.is_some() {
+            self.error = Some("Cannot edit config while an operation is running.".to_string());
+            return;
+        }
+        let Some(path) = self.config_path.clone() else {
+            self.error = Some("No config path set — cannot open editor.".to_string());
+            return;
+        };
+        let editor = std::env::var("EDITOR")
+            .or_else(|_| std::env::var("VISUAL"))
+            .unwrap_or_else(|_| "vi".to_string());
+
+        // Suspend: leave alternate screen and disable raw mode.
+        let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
+        let _ = terminal::disable_raw_mode();
+
+        let status = std::process::Command::new(&editor).arg(&path).status();
+        if let Err(e) = &status {
+            // Resume first, then surface the error.
+            let _ = terminal::enable_raw_mode();
+            let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
+            self.error = Some(format!("Failed to launch editor '{}': {}", editor, e));
+            return;
+        }
+
+        // Resume TUI.
+        let _ = terminal::enable_raw_mode();
+        let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
+
+        // Reload config lines from disk.
+        self.config_lines = load_config_lines(Some(&path));
+        self.config_viewport.set_dims(self.config_lines.len(), 0);
     }
 
     fn render_operate(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -900,7 +1012,10 @@ impl App {
                 self.last_timeout_secs
             ),
             TabId::Checkout => "Checkout tab\n\nLatest snapshot per host. Use ↑↓/jk/PgUp/PgDn/Home/End to scroll.\nData refreshes automatically after each `check` run from Operate.".to_string(),
-            TabId::Config => "Config tab\n\nFull config browsing/editing arrives in Phase 4 (read-only) and Phase 7 (editable).".to_string(),
+            TabId::Config => format!(
+                "Config tab\n\nShows the raw config file (read-only). Use ↑↓/jk/PgUp/PgDn/Home/End to scroll.\nPress `e` to open the file in $EDITOR — the TUI suspends and resumes when you exit.\n\nConfig path: {}",
+                self.config_path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(default)".to_string())
+            ),
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -997,7 +1112,7 @@ impl App {
         }
 
         let hints = match self.active_tab {
-            TabId::Config => "1/2/3:Tabs  Tab:Cycle  ?:Help  q:Quit",
+            TabId::Config => "↑↓/jk:Scroll  PgUp/PgDn  Home/End  e:Edit  Tab:Cycle  ?:Help  q:Quit",
             TabId::Operate => "1/2/3:Tabs  Tab:Cycle  f:Filter  ?:Help  q:Quit",
             TabId::Checkout => "↑↓/jk:Rows  PgUp/PgDn  Home/End  Tab:Cycle  ?:Help  q:Quit",
         };
@@ -1035,7 +1150,11 @@ Filter popup
   Enter on [Apply]   Commit + persist
   Esc                Cancel
 
-Phase 2 build — operation execution arrives in Phase 3.
+Config tab
+  ↑↓ / j k    Scroll
+  PgUp/PgDn   Page navigation
+  Home/End    Jump to top / bottom
+  e           Open config in $EDITOR (TUI suspends while editor runs)
 ";
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1045,6 +1164,22 @@ Phase 2 build — operation execution arrives in Phase 3.
             .block(block)
             .wrap(Wrap { trim: false });
         frame.render_widget(p, popup_area);
+    }
+}
+
+/// Read the config file at `path` (or the default config path) into lines.
+/// Returns an empty Vec if the file cannot be read.
+fn load_config_lines(path: Option<&std::path::Path>) -> Vec<String> {
+    let resolved = match path {
+        Some(p) => p.to_path_buf(),
+        None => match crate::config::app::config_path() {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        },
+    };
+    match std::fs::read_to_string(&resolved) {
+        Ok(text) => text.lines().map(|l| l.to_string()).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
