@@ -6,22 +6,22 @@ use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSumma
 
 /// Snapshot row from the database.
 #[allow(dead_code)]
-struct HostSnapshot {
-    host: String,
-    collected_at: i64,
-    online: bool,
-    data: serde_json::Value,
+pub(crate) struct HostSnapshot {
+    pub(crate) host: String,
+    pub(crate) collected_at: i64,
+    pub(crate) online: bool,
+    pub(crate) data: serde_json::Value,
     /// When the host was last confirmed online (from host_last_seen table).
-    last_online: i64,
+    pub(crate) last_online: i64,
 }
 
 /// Columns to display, derived from enabled metrics in applicable check entries.
-struct DisplayColumns {
-    metrics: Vec<String>,
+pub(crate) struct DisplayColumns {
+    pub(crate) metrics: Vec<String>,
 }
 
 impl DisplayColumns {
-    fn from_context(ctx: &Context) -> Self {
+    pub(crate) fn from_context(ctx: &Context) -> Self {
         let checks = ctx.resolve_checks();
         let mut metrics: Vec<String> = Vec::new();
         for entry in &checks {
@@ -112,7 +112,7 @@ pub async fn run(
 }
 
 /// Fetch the latest snapshot for each host.
-fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<HostSnapshot>> {
+pub(crate) fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<HostSnapshot>> {
     let mut snapshots = Vec::new();
     for host in host_names {
         let mut stmt = ctx.db.prepare(
@@ -278,7 +278,7 @@ fn extract_battery(data: &serde_json::Value) -> String {
     "-".to_string()
 }
 
-fn format_relative_time(ts: i64) -> String {
+pub(crate) fn format_relative_time(ts: i64) -> String {
     if ts == 0 {
         return "never".to_string();
     }

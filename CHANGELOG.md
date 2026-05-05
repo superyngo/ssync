@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Phase 0.7 command-core extraction: new `commands::report` module with `ProgressSink` trait, `HostStatus` enum, `CheckHostResult`, `CheckReport`, and `CommandReport`; `commands::check` split into `check_core` (DB-writing pure core) and a thin CLI `run` wrapper with a `PrinterSink`. `Context::from_tui_parts` constructor added (TUI-feature-gated). `commands::checkout` helpers (`fetch_latest_snapshots`, `DisplayColumns`, `format_relative_time`, `HostSnapshot`) promoted to `pub(crate)` for TUI reuse.
 - TUI groundwork (Phase 0 + 0.5 of `docs/tui_reconstruct_plan.md`): added `ssync-tui` bin target gated by `tui` feature; `toml_edit`, `unicode-width`, optional `tokio-util` deps; `name`/`id` optional fields on `[[check]]`/`[[sync]]` entries (legacy configs continue to load); BOM stripping in config load; `~` expansion in `resolve_path`; `state::db::resolved_state_dir()` helper; format-preserving config save via `toml_edit` with round-trip validation
 - Removed unused `tracing-appender` dependency
 

@@ -5,6 +5,7 @@ pub mod exec;
 pub mod init;
 pub mod list;
 pub mod log;
+pub mod report;
 pub mod run;
 pub mod sync;
 
@@ -59,6 +60,33 @@ impl Context {
             timeout,
             mode,
             serial: target.serial,
+            verbose,
+        })
+    }
+
+    /// Build a `Context` for a single TUI-driven operation (per
+    /// docs/tui_reconstruct_plan.md §6.4 and AD-5/AD-6/AD-16).
+    ///
+    /// The caller has already cloned `config` from `App.config` (AD-6 ownership
+    /// rule). A fresh `rusqlite::Connection` is opened per call against the
+    /// resolved state directory; `App.db` is never moved or shared (AD-5).
+    #[cfg(feature = "tui")]
+    pub fn from_tui_parts(
+        config: AppConfig,
+        config_path: Option<PathBuf>,
+        mode: TargetMode,
+        serial: bool,
+        timeout: u64,
+        verbose: bool,
+    ) -> Result<Self> {
+        let db = crate::state::db::open(config.settings.state_dir.as_deref())?;
+        Ok(Self {
+            config,
+            config_path,
+            db,
+            timeout,
+            mode,
+            serial,
             verbose,
         })
     }
