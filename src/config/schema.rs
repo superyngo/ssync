@@ -1,6 +1,25 @@
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+/// Generate a short stable identifier for a new entry (AD-18).
+/// Uses BLAKE3 over (name_bytes + unix_nanos) and takes the first 8 hex chars.
+pub fn generate_entry_id(name: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(name.as_bytes());
+    hasher.update(&nanos.to_le_bytes());
+    let hash = hasher.finalize();
+    let bytes = hash.as_bytes();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
+}
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -129,6 +148,15 @@ impl std::fmt::Display for ShellType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckEntry {
+    /// Display label for the TUI sidebar. Pure UI metadata; never a lookup key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Stable random identifier (8 hex chars) for TUI persistence references.
+    /// Empty string for legacy configs; falls back to vec index.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+
     #[serde(default)]
     pub enabled: Vec<String>,
 
@@ -156,6 +184,15 @@ pub struct CheckPath {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncEntry {
+    /// Display label for the TUI sidebar. Pure UI metadata; never a lookup key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Stable random identifier (8 hex chars) for TUI persistence references.
+    /// Empty string for legacy configs; falls back to vec index.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+
     pub paths: Vec<String>,
     /// Groups this sync applies to. Empty = unscoped.
     #[serde(default)]

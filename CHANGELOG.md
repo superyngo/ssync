@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- TUI groundwork (Phase 0 + 0.5 of `docs/tui_reconstruct_plan.md`): added `ssync-tui` bin target gated by `tui` feature; `toml_edit`, `unicode-width`, optional `tokio-util` deps; `name`/`id` optional fields on `[[check]]`/`[[sync]]` entries (legacy configs continue to load); BOM stripping in config load; `~` expansion in `resolve_path`; `state::db::resolved_state_dir()` helper; format-preserving config save via `toml_edit` with round-trip validation
+- Removed unused `tracing-appender` dependency
+
 ## [v0.8.0] - 2026-04-29
 
 ### Added

@@ -4,16 +4,26 @@ version = "0.8.0"
 edition = "2021"
 description = "SSH-config-based cross-platform remote management tool"
 
+[[bin]]
+name = "ssync"
+path = "src/main.rs"
+
+[[bin]]
+name = "ssync-tui"
+path = "src/main.rs"
+required-features = ["tui"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "macros", "sync", "io-util", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "time", "macros", "sync", "io-util", "fs", "signal"] }
 
 # Config
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+toml_edit = "0.22"
 
 # Password input
 rpassword = "7"
@@ -42,6 +52,7 @@ indicatif = "0.17"
 # TUI
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
+tokio-util = { version = "0.7", optional = true }
 
 # Cross-platform paths
 dirs = "5"
@@ -52,7 +63,6 @@ whoami = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # Temp files
 tempfile = "3"
@@ -60,6 +70,9 @@ tempfile = "3"
 # JSON
 serde_json = "1"
 
+# Unicode display width (terminal column counting)
+unicode-width = "0.1"
+
 [features]
 default = []
-tui = ["ratatui", "crossterm"]
+tui = ["ratatui", "crossterm", "tokio-util"]

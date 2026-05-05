@@ -25,13 +25,20 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("ssync.db"))
 }
 
+/// Resolve the effective state directory (AD-16): honors the
+/// `[settings].state_dir` override or falls back to the OS default.
+/// Single source of truth used by both DB open and TUI state file path.
+pub fn resolved_state_dir(override_dir: Option<&std::path::Path>) -> Result<PathBuf> {
+    match override_dir {
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => state_dir(),
+    }
+}
+
 /// Open or create the SQLite database with migrations applied.
 /// If `override_dir` is provided, uses that directory instead of the default.
 pub fn open(override_dir: Option<&std::path::Path>) -> Result<Connection> {
-    let path = match override_dir {
-        Some(dir) => dir.join("ssync.db"),
-        None => db_path()?,
-    };
+    let path = resolved_state_dir(override_dir)?.join("ssync.db");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
