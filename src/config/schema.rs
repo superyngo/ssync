@@ -21,7 +21,7 @@ pub fn generate_entry_id(name: &str) -> String {
     )
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub settings: Settings,
@@ -36,7 +36,7 @@ pub struct AppConfig {
     pub sync: Vec<SyncEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default = "default_timeout")]
     pub default_timeout: u64,

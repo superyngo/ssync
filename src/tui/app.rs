@@ -6,6 +6,7 @@
 //! signal handlers (SIGHUP/SIGTERM on Unix, ctrl_c on Windows).
 
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,8 +25,14 @@ use crate::commands::checkout::{
     metric_width, DisplayColumns, HostSnapshot,
 };
 use crate::commands::Context;
+use crate::config::schema::AppConfig;
 
+use super::components::popup::centered_rect;
+use super::components::target_filter::{FilterPopup, FilterPopupResult};
 use super::components::viewport::Viewport;
+use super::state::persist::{
+    self, ActiveTab, TargetFilterState, TuiPersistedState,
+};
 use super::tabs::TabId;
 use super::theme::Theme;
 
@@ -42,11 +49,14 @@ pub struct App {
     pub checkout_viewport: Viewport,
     pub checkout_snapshots: Vec<HostSnapshot>,
     pub checkout_columns: DisplayColumns,
+    pub config: AppConfig,
+    pub state_file_path: PathBuf,
+    pub target_filter: TargetFilterState,
+    pub filter_popup: Option<FilterPopup>,
 }
 
 impl App {
     pub fn from_context(ctx: &Context) -> Self {
-        // Best-effort initial load: empty list if any error or no hosts in config.
         let columns = DisplayColumns::from_context(ctx);
         let host_names: Vec<&str> = ctx.config.host.iter().map(|h| h.name.as_str()).collect();
         let snapshots = if host_names.is_empty() {
@@ -56,8 +66,23 @@ impl App {
         };
         let mut viewport = Viewport::new();
         viewport.set_dims(snapshots.len(), 0);
+
+        // Resolve TUI state file path; on failure fall back to a path in the
+        // OS temp dir so save/load remain functional even with unusual configs.
+        let state_file_path = persist::state_file_path(&ctx.config, ctx.config_path.as_deref())
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to resolve TUI state path; using temp dir: {e}");
+                std::env::temp_dir().join("ssync_tui_state.toml")
+            });
+
+        // Load persisted state and validate against current config (§16.2).
+        let mut persisted = persist::load(&state_file_path);
+        persist::validate_filter(&mut persisted.target_filter, &ctx.config);
+
+        let active_tab = persisted.tui_state.active_tab.to_tab_id();
+
         Self {
-            active_tab: TabId::Checkout,
+            active_tab,
             theme: Theme::default_palette(),
             error: None,
             help_open: false,
@@ -65,6 +90,27 @@ impl App {
             checkout_viewport: viewport,
             checkout_snapshots: snapshots,
             checkout_columns: columns,
+            config: ctx.config.clone(),
+            state_file_path,
+            target_filter: persisted.target_filter,
+            filter_popup: None,
+        }
+    }
+
+    /// Persist current state to disk. Errors are logged but never propagated.
+    fn save_state(&self) {
+        let state = TuiPersistedState {
+            tui_state: super::state::persist::TuiSection {
+                active_tab: ActiveTab::from_tab_id(self.active_tab),
+            },
+            target_filter: self.target_filter.clone(),
+            operate: Default::default(),
+        };
+        if let Err(e) = persist::save(&self.state_file_path, &state) {
+            tracing::warn!(
+                "Failed to save TUI state to {}: {e}",
+                self.state_file_path.display()
+            );
         }
     }
 
@@ -81,6 +127,7 @@ impl App {
         let mut dirty = true;
         loop {
             if self.should_quit {
+                self.save_state();
                 break;
             }
 
@@ -124,6 +171,24 @@ impl App {
             return Ok(true);
         }
 
+        // Filter popup is the highest-priority focus root after Ctrl+C.
+        if let Some(popup) = self.filter_popup.as_mut() {
+            match popup.handle_key(key) {
+                FilterPopupResult::Continue => return Ok(true),
+                FilterPopupResult::Cancelled => {
+                    self.filter_popup = None;
+                    return Ok(true);
+                }
+                FilterPopupResult::Applied => {
+                    let popup = self.filter_popup.take().unwrap();
+                    self.target_filter = popup.state;
+                    persist::validate_filter(&mut self.target_filter, &self.config);
+                    self.save_state();
+                    return Ok(true);
+                }
+            }
+        }
+
         // Help popup intercepts: only Esc/? close it.
         if self.help_open {
             match key.code {
@@ -143,6 +208,20 @@ impl App {
             KeyCode::Char('?') => {
                 self.help_open = true;
                 Ok(true)
+            }
+            KeyCode::Char('f') => {
+                // Operate-tab-only per §13 / Phase 2 plan; Checkout filter
+                // wiring lands in Phase 6. For now, only Operate opens it.
+                if self.active_tab == TabId::Operate {
+                    let popup = FilterPopup::new(
+                        self.target_filter.clone(),
+                        true, // allow_shell on Operate
+                        &self.config,
+                    );
+                    self.filter_popup = Some(popup);
+                    return Ok(true);
+                }
+                Ok(false)
             }
             KeyCode::Esc => {
                 if self.error.is_some() {
@@ -229,17 +308,16 @@ impl App {
                 frame,
                 "Config — available in Phase 4",
             ),
-            TabId::Operate => self.render_placeholder(
-                chunks[1],
-                frame,
-                "Operate — available in Phase 3",
-            ),
+            TabId::Operate => self.render_operate_placeholder(chunks[1], frame),
             TabId::Checkout => self.render_checkout(chunks[1], frame),
         }
         self.render_status_bar(chunks[2], frame);
 
         if self.help_open {
             self.render_help_popup(area, frame);
+        }
+        if let Some(popup) = &self.filter_popup {
+            popup.render(area, &self.theme, frame);
         }
     }
 
@@ -267,6 +345,22 @@ impl App {
         let p = Paragraph::new(text)
             .style(Style::default().fg(self.theme.inactive))
             .block(Block::default().borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(p, area);
+    }
+
+    fn render_operate_placeholder(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let body = format!(
+            "Operate — full UI lands in Phase 3.\n\nCurrent filter:\n  Mode:    {:?}\n  Groups:  {:?}\n  Hosts:   {:?}\n  Serial:  {}\n  Timeout: {}s\n\nPress `f` to open the Target Filter popup.",
+            self.target_filter.mode,
+            self.target_filter.groups,
+            self.target_filter.hosts,
+            self.target_filter.serial,
+            self.target_filter.timeout,
+        );
+        let p = Paragraph::new(body)
+            .style(Style::default().fg(self.theme.inactive))
+            .block(Block::default().borders(Borders::ALL).title(" Operate (Phase 2 preview) "))
             .wrap(Wrap { trim: false });
         frame.render_widget(p, area);
     }
@@ -358,7 +452,8 @@ impl App {
         }
 
         let hints = match self.active_tab {
-            TabId::Config | TabId::Operate => "1/2/3:Tabs  Tab:Cycle  ?:Help  q:Quit",
+            TabId::Config => "1/2/3:Tabs  Tab:Cycle  ?:Help  q:Quit",
+            TabId::Operate => "1/2/3:Tabs  Tab:Cycle  f:Filter  ?:Help  q:Quit",
             TabId::Checkout => "↑↓/jk:Rows  PgUp/PgDn  Home/End  Tab:Cycle  ?:Help  q:Quit",
         };
         let p = Paragraph::new(Line::from(vec![Span::styled(
@@ -369,24 +464,33 @@ impl App {
     }
 
     fn render_help_popup(&self, area: Rect, frame: &mut ratatui::Frame) {
-        let popup_area = centered_rect(60, 50, area);
+        let popup_area = centered_rect(60, 60, area);
         frame.render_widget(Clear, popup_area);
         let body = "\
 Global keys
   1 / 2 / 3   Switch to Config / Operate / Checkout
   Tab         Cycle to next tab
   Shift+Tab   Cycle to previous tab
-  q           Quit
-  Ctrl+C      Quit immediately
+  q           Quit (state saved)
+  Ctrl+C      Quit immediately (state saved)
   Esc         Close popup / clear error
   ?           Toggle this help
+
+Operate tab
+  f           Open Target Filter popup
 
 Checkout tab
   ↑↓ / j k    Move row selection
   PgUp/PgDn   Page navigation
   Home/End    Jump to top / bottom
 
-Phase 1a build — additional bindings arrive in later phases.
+Filter popup
+  ↑↓ / Tab    Move between fields
+  Space/Enter Toggle / select
+  Enter on [Apply]   Commit + persist
+  Esc                Cancel
+
+Phase 2 build — operation execution arrives in Phase 3.
 ";
         let block = Block::default()
             .borders(Borders::ALL)
@@ -397,26 +501,6 @@ Phase 1a build — additional bindings arrive in later phases.
             .wrap(Wrap { trim: false });
         frame.render_widget(p, popup_area);
     }
-}
-
-/// Compute a centered rectangle with `percent_x` × `percent_y` of `area`.
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }
 
 /// Spawn a background task that listens for OS signals and pushes a unit into
