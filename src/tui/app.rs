@@ -39,37 +39,54 @@ use super::components::input_field::{InputField, InputMode};
 use super::components::popup::centered_rect;
 use super::components::target_filter::{FilterPopup, FilterPopupResult};
 use super::components::viewport::Viewport;
+use super::log_layer::LogBufferHandle;
 use super::state::persist::{
     self, ActiveTab, OperationKind, SyncMode, TargetFilterMode, TargetFilterState,
     TuiPersistedState,
 };
+use super::tabs::config_tab::trunc;
 use super::tabs::config_tab::ConfigTabState;
+use super::tabs::operate_tab::{self, OperateFocus, OperateRenderData, ParamPanelField};
 use super::tabs::TabId;
 use super::theme::Theme;
+use crate::host::auth::{SshAuthRequest, SshAuthSender};
+use operate_tab::truncate;
 
 const MIN_COLS: u16 = 80;
 const MIN_ROWS: u16 = 24;
 const POLL_INTERVAL_MS: u64 = 50;
 
-/// Operate-tab focused element (Phase 5 model).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OperateFocus {
-    OpRadio,
-    ParamPanel,
-    TargetRow,
-    Execute,
+/// State for the masked SSH auth credential popup.
+struct AuthPopup {
+    prompt: String,
+    input: InputField,
+    responder: Option<tokio::sync::oneshot::Sender<String>>,
 }
 
-/// Which field in the param panel has focus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum ParamPanelField {
-    #[default]
-    CommandOrScript,
-    Sudo,
-    SecondFlag, // `yes` for Run, `keep` for Exec
-    SyncModeToggle,
-    SyncAdHocInput,
-    SyncDryRun,
+impl AuthPopup {
+    fn new(req: SshAuthRequest) -> Self {
+        let mut input = InputField::new("");
+        input.activate();
+        Self {
+            prompt: req.prompt,
+            input,
+            responder: Some(req.responder),
+        }
+    }
+
+    /// Consume the popup, sending the credential. Zeroizes the input buffer.
+    fn submit(&mut self) {
+        let credential = std::mem::take(&mut self.input.value);
+        if let Some(tx) = self.responder.take() {
+            let _ = tx.send(credential);
+        }
+    }
+
+    /// Dismiss without sending (drops sender → auth failure).
+    fn cancel(&mut self) {
+        self.input.value.clear();
+        self.responder = None;
+    }
 }
 
 pub struct App {
@@ -129,10 +146,24 @@ pub struct App {
     db_stale: bool,
     /// Tracks the most recent timeout used (filter timeout or default).
     last_timeout_secs: u64,
+    /// Log overlay open state (Phase 7, §17.3 item 3).
+    log_overlay_open: bool,
+    /// Log overlay viewport for scrolling.
+    log_overlay_vp: Viewport,
+    /// Log buffer: in-memory ring of tracing events (§17.2).
+    log_buffer: Option<LogBufferHandle>,
+    /// Active SSH auth popup, if any. Takes highest key-routing priority after Ctrl+C.
+    auth_popup: Option<AuthPopup>,
+    /// Sender side of the auth bridge channel; cloned into each execute operation.
+    auth_bridge_tx: Option<SshAuthSender>,
+    /// Scroll offset for the Applicable Entries panel (0 = top).
+    entries_scroll: usize,
+    /// User-controlled scroll offset for the progress popup (None = auto-scroll to bottom).
+    progress_popup_scroll: Option<usize>,
 }
 
 impl App {
-    pub fn from_context(ctx: &Context) -> Self {
+    pub fn from_context(ctx: &Context, log_buffer: Option<LogBufferHandle>) -> Self {
         let columns = DisplayColumns::from_context(ctx);
         let host_names: Vec<&str> = ctx.config.host.iter().map(|h| h.name.as_str()).collect();
         let snapshots = if host_names.is_empty() {
@@ -202,10 +233,34 @@ impl App {
             completed_report: None,
             db_stale: false,
             last_timeout_secs: timeout,
+            log_overlay_open: false,
+            log_overlay_vp: Viewport::new(),
+            log_buffer,
+            auth_popup: None,
+            auth_bridge_tx: None,
+            entries_scroll: 0,
+            progress_popup_scroll: None,
         }
     }
 
     /// Persist current state to disk. Errors are logged but never propagated.
+    /// Returns true if the current operation has an applicable entries panel
+    /// (check op, or sync in ConfigEntries mode).
+    fn has_entries_panel(&self) -> bool {
+        self.operate_operation == OperationKind::Check
+            || (self.operate_operation == OperationKind::Sync
+                && self.sync_mode == SyncMode::ConfigEntries)
+    }
+
+    /// Returns the total number of entries in the currently-applicable panel.
+    fn entries_panel_count(&self) -> usize {
+        match self.operate_operation {
+            OperationKind::Check => self.config.check.len(),
+            OperationKind::Sync => self.config.sync.len(),
+            _ => 0,
+        }
+    }
+
     fn save_state(&self) {
         let state = TuiPersistedState {
             tui_state: super::state::persist::TuiSection {
@@ -247,6 +302,16 @@ impl App {
             .take()
             .expect("event_rx is Some after construction");
 
+        // Bridge: convert SshAuthRequest events to TuiEvent::SshAuthRequired.
+        let (auth_tx, mut auth_rx) = tokio::sync::mpsc::unbounded_channel::<SshAuthRequest>();
+        self.auth_bridge_tx = Some(auth_tx);
+        let event_tx_for_bridge = self.event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(req) = auth_rx.recv().await {
+                let _ = event_tx_for_bridge.send(TuiEvent::SshAuthRequired(req));
+            }
+        });
+
         let mut dirty = true;
         loop {
             if self.should_quit {
@@ -279,6 +344,12 @@ impl App {
                 if self.handle_event(ev)? {
                     dirty = true;
                 }
+            }
+
+            if self.config_tab.pending_open_editor {
+                self.config_tab.pending_open_editor = false;
+                self.needs_editor_open = true;
+                dirty = true;
             }
 
             // Open external editor if requested (§7.4 4-stage flow).
@@ -338,6 +409,10 @@ impl App {
                 self.error = Some(format!("Operation failed: {msg}"));
                 true
             }
+            TuiEvent::SshAuthRequired(req) => {
+                self.auth_popup = Some(AuthPopup::new(req));
+                true
+            }
         }
     }
 
@@ -368,6 +443,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
+        let auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
 
@@ -398,6 +474,7 @@ impl App {
                         serial,
                         timeout,
                         verbose,
+                        auth_sender,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -424,6 +501,7 @@ impl App {
                 });
             });
 
+        self.progress_popup_scroll = None;
         self.running_op = Some(RunningOp {
             cancel,
             started_at: std::time::Instant::now(),
@@ -461,6 +539,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
+        let auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let sudo = self.run_sudo;
@@ -481,7 +560,7 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, false,
+                        cfg, cfg_path, target_mode, serial, timeout, false, auth_sender,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -508,6 +587,7 @@ impl App {
                 });
             });
 
+        self.progress_popup_scroll = None;
         self.running_op = Some(RunningOp {
             cancel,
             started_at: std::time::Instant::now(),
@@ -545,6 +625,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
+        let auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let sudo = self.exec_sudo;
@@ -565,7 +646,7 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, false,
+                        cfg, cfg_path, target_mode, serial, timeout, false, auth_sender,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -592,6 +673,7 @@ impl App {
                 });
             });
 
+        self.progress_popup_scroll = None;
         self.running_op = Some(RunningOp {
             cancel,
             started_at: std::time::Instant::now(),
@@ -625,6 +707,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
+        let auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let dry_run = self.sync_dry_run;
@@ -648,7 +731,7 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, false,
+                        cfg, cfg_path, target_mode, serial, timeout, false, auth_sender,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -675,6 +758,7 @@ impl App {
                 });
             });
 
+        self.progress_popup_scroll = None;
         self.running_op = Some(RunningOp {
             cancel,
             started_at: std::time::Instant::now(),
@@ -700,6 +784,7 @@ impl App {
                     mode: TargetMode::All,
                     serial: false,
                     verbose: false,
+                    tui_auth_sender: None,
                 };
                 if let Ok(snaps) = fetch_latest_snapshots(&tmp_ctx, &host_names) {
                     self.checkout_all_snapshots = snaps;
@@ -751,6 +836,24 @@ impl App {
         // Ctrl+C always quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
+            return Ok(true);
+        }
+
+        // Auth popup takes highest priority after Ctrl+C.
+        if let Some(popup) = self.auth_popup.as_mut() {
+            match key.code {
+                KeyCode::Enter => {
+                    popup.submit();
+                    self.auth_popup = None;
+                }
+                KeyCode::Esc => {
+                    popup.cancel();
+                    self.auth_popup = None;
+                }
+                _ => {
+                    popup.input.handle_key(key);
+                }
+            }
             return Ok(true);
         }
 
@@ -841,6 +944,11 @@ impl App {
             }
         }
 
+        // Log overlay intercepts: Esc/L close it, scroll inside.
+        if self.log_overlay_open {
+            return self.handle_log_overlay_key(key);
+        }
+
         // Completed report popup: Esc / Enter dismisses it.
         if self.completed_report.is_some() {
             match key.code {
@@ -858,7 +966,8 @@ impl App {
                 op.cancel.cancel();
                 return Ok(true);
             }
-            // While running, ignore most keys except 1/2/3 tab switches and Ctrl+C.
+            // While running, ignore most keys except 1/2/3 tab switches, Ctrl+C,
+            // and Up/Down which scroll the progress popup.
             match key.code {
                 KeyCode::Char('1') => {
                     self.active_tab = TabId::Config;
@@ -880,6 +989,36 @@ impl App {
                     self.active_tab = self.active_tab.prev();
                     return Ok(true);
                 }
+                KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Operate => {
+                    // Enable manual scroll: lock to current position if auto-scrolling.
+                    let outcomes_len = self
+                        .running_op
+                        .as_ref()
+                        .map_or(0, |o| o.host_outcomes.len());
+                    let current = self
+                        .progress_popup_scroll
+                        .unwrap_or(outcomes_len.saturating_sub(12));
+                    self.progress_popup_scroll = Some(current.saturating_sub(1));
+                    return Ok(true);
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Operate => {
+                    let outcomes_len = self
+                        .running_op
+                        .as_ref()
+                        .map_or(0, |o| o.host_outcomes.len());
+                    let current = self
+                        .progress_popup_scroll
+                        .unwrap_or(outcomes_len.saturating_sub(12));
+                    let max_start = outcomes_len.saturating_sub(12);
+                    let next = (current + 1).min(max_start);
+                    // If scrolled to the auto-scroll position, clear manual scroll.
+                    if next >= max_start {
+                        self.progress_popup_scroll = None;
+                    } else {
+                        self.progress_popup_scroll = Some(next);
+                    }
+                    return Ok(true);
+                }
                 _ => return Ok(false),
             }
         }
@@ -898,6 +1037,15 @@ impl App {
                 self.info_open = true;
                 Ok(true)
             }
+            KeyCode::Char('L') => {
+                self.log_overlay_open = !self.log_overlay_open;
+                if self.log_overlay_open {
+                    self.log_overlay_vp = Viewport::new();
+                    let len = self.log_buffer.as_ref().map_or(0, |b| b.len());
+                    self.log_overlay_vp.set_dims(len, 0);
+                }
+                Ok(true)
+            }
             KeyCode::Esc => {
                 if self.error.is_some() {
                     self.error = None;
@@ -906,14 +1054,29 @@ impl App {
                 Ok(false)
             }
             KeyCode::Char('1') => {
+                if self.active_tab == TabId::Config && self.config_tab.config_dirty {
+                    self.error =
+                        Some("Unsaved config changes — press S to save or fix first.".to_string());
+                    return Ok(true);
+                }
                 self.active_tab = TabId::Config;
                 Ok(true)
             }
             KeyCode::Char('2') => {
+                if self.active_tab == TabId::Config && self.config_tab.config_dirty {
+                    self.error =
+                        Some("Unsaved config changes — press S to save or fix first.".to_string());
+                    return Ok(true);
+                }
                 self.active_tab = TabId::Operate;
                 Ok(true)
             }
             KeyCode::Char('3') => {
+                if self.active_tab == TabId::Config && self.config_tab.config_dirty {
+                    self.error =
+                        Some("Unsaved config changes — press S to save or fix first.".to_string());
+                    return Ok(true);
+                }
                 self.active_tab = TabId::Checkout;
                 Ok(true)
             }
@@ -928,7 +1091,7 @@ impl App {
                 Ok(true)
             }
 
-            // ── Config tab (§8.6, §12.2, Phase 4) ─────────────────────────
+            // ── Config tab (§8.6, §12.2, Phase 4+7) ───────────────────────────
             // E opens external editor (§7.4 4-stage flow).
             KeyCode::Char('E') if self.active_tab == TabId::Config => {
                 if self.running_op.is_some() {
@@ -936,21 +1099,70 @@ impl App {
                         Some("Cannot edit config while an operation is running.".to_string());
                 } else if self.config_path.is_none() {
                     self.error = Some("No config path set — cannot open editor.".to_string());
+                } else if self.config_tab.config_dirty {
+                    use crate::tui::tabs::config_tab::{ConfirmAction, ConfirmState};
+                    self.config_tab.confirm = Some(ConfirmState {
+                        prompt: "Unsaved changes will be lost.".to_string(),
+                        action: ConfirmAction::OpenEditorDirty,
+                        hints: "  [y/Enter] Open editor   [Esc] Cancel",
+                    });
                 } else {
                     self.needs_editor_open = true;
                 }
                 Ok(true)
             }
-            // All other Config tab keys routed to ConfigTabState.
+            // S saves config with toml_edit round-trip (Phase 7).
+            KeyCode::Char('S') if self.active_tab == TabId::Config => {
+                self.save_config();
+                Ok(true)
+            }
+            // 'a' adds a new entry (Phase 7 Case B).
+            KeyCode::Char('a') if self.active_tab == TabId::Config => {
+                let kind = self.config_add_kind();
+                if let Some(kind) = kind {
+                    self.config_tab.start_add_entry(kind);
+                }
+                Ok(true)
+            }
+            // 'd' deletes focused entry (Phase 7).
+            KeyCode::Char('d') if self.active_tab == TabId::Config => {
+                if self.config_tab.confirm.is_some() {
+                    // Confirm dialog handles 'y'/'n'; 'd' is not consumed here.
+                    return Ok(false);
+                }
+                self.config_tab.request_delete();
+                Ok(true)
+            }
+            // All other Config tab keys routed to ConfigTabState (including 'e'/Enter for inline edit).
             _ if self.active_tab == TabId::Config => {
-                Ok(self.config_tab.handle_key(key, &self.config))
+                let handled = self.config_tab.handle_key(key, &mut self.config);
+                if let Some((kind, index)) = self.config_tab.pending_delete.take() {
+                    self.config_tab
+                        .execute_delete(&mut self.config, kind, index);
+                }
+                Ok(handled)
             }
 
             // ── Operate tab ────────────────────────────────────────────────
             // Vertical navigation between zones (OpRadio → ParamPanel → TargetRow → Execute).
             KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Operate => {
                 self.operate_focus = match self.operate_focus {
-                    OperateFocus::Execute => OperateFocus::TargetRow,
+                    OperateFocus::Execute => {
+                        // Only go to ApplicableEntries if there's an entries panel visible.
+                        if self.has_entries_panel() {
+                            OperateFocus::ApplicableEntries
+                        } else {
+                            OperateFocus::TargetRow
+                        }
+                    }
+                    OperateFocus::ApplicableEntries => {
+                        if self.entries_scroll == 0 {
+                            OperateFocus::TargetRow
+                        } else {
+                            self.entries_scroll -= 1;
+                            OperateFocus::ApplicableEntries
+                        }
+                    }
                     OperateFocus::TargetRow => {
                         if self.operate_operation == OperationKind::Check {
                             OperateFocus::OpRadio
@@ -1029,7 +1241,24 @@ impl App {
                             _ => OperateFocus::TargetRow,
                         },
                     },
-                    OperateFocus::TargetRow => OperateFocus::Execute,
+                    OperateFocus::TargetRow => {
+                        if self.has_entries_panel() {
+                            self.entries_scroll = 0;
+                            OperateFocus::ApplicableEntries
+                        } else {
+                            OperateFocus::Execute
+                        }
+                    }
+                    OperateFocus::ApplicableEntries => {
+                        let entry_count = self.entries_panel_count();
+                        let max_scroll = entry_count.saturating_sub(6);
+                        if self.entries_scroll < max_scroll {
+                            self.entries_scroll += 1;
+                            OperateFocus::ApplicableEntries
+                        } else {
+                            OperateFocus::Execute
+                        }
+                    }
                     OperateFocus::Execute => OperateFocus::Execute,
                 };
                 Ok(true)
@@ -1232,6 +1461,12 @@ impl App {
         if let Some(report) = self.completed_report.clone() {
             self.render_results_popup(area, frame, &report);
         }
+        if self.log_overlay_open {
+            self.render_log_overlay(area, frame);
+        }
+        if self.auth_popup.is_some() {
+            self.render_auth_popup(area, frame);
+        }
     }
 
     fn render_tab_bar(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -1265,6 +1500,193 @@ impl App {
             &self.config,
             self.config_path.as_deref(),
         );
+    }
+
+    fn save_config(&mut self) {
+        if let Some(path) = &self.config_path {
+            match crate::config::app::save(&self.config, Some(path)) {
+                Ok(()) => {
+                    self.config_tab.config_dirty = false;
+                    self.config_tab.reload_banner_until =
+                        Some(Instant::now() + Duration::from_secs(2));
+                    self.config_tab.reload(&self.config, Some(path));
+                }
+                Err(e) => {
+                    self.error = Some(format!("Config save failed: {e}"));
+                }
+            }
+        } else {
+            self.error = Some("No config path set — cannot save.".to_string());
+        }
+    }
+
+    fn config_add_kind(&self) -> Option<super::tabs::config_tab::EntryFormKind> {
+        use super::tabs::config_tab::EntryFormKind;
+        let item = self
+            .config_tab
+            .items
+            .get(self.config_tab.sidebar_vp.selected);
+        match item {
+            Some(super::tabs::config_tab::SidebarItem::SectionHosts)
+            | Some(super::tabs::config_tab::SidebarItem::Host(_)) => Some(EntryFormKind::Host),
+            Some(super::tabs::config_tab::SidebarItem::SectionChecks)
+            | Some(super::tabs::config_tab::SidebarItem::Check(_)) => Some(EntryFormKind::Check),
+            Some(super::tabs::config_tab::SidebarItem::SectionSyncs)
+            | Some(super::tabs::config_tab::SidebarItem::Sync(_)) => Some(EntryFormKind::Sync),
+            _ => None,
+        }
+    }
+
+    fn handle_log_overlay_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('L') => {
+                self.log_overlay_open = false;
+                Ok(true)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.log_overlay_vp.move_up();
+                Ok(true)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.log_overlay_vp.move_down();
+                Ok(true)
+            }
+            KeyCode::PageUp => {
+                self.log_overlay_vp.page_up();
+                Ok(true)
+            }
+            KeyCode::PageDown => {
+                self.log_overlay_vp.page_down();
+                Ok(true)
+            }
+            KeyCode::Home => {
+                self.log_overlay_vp.home();
+                Ok(true)
+            }
+            KeyCode::End => {
+                self.log_overlay_vp.end();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn render_log_overlay(&mut self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(80, 60, area);
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.warning))
+            .title(" Log (L to close) ");
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let buf = match &self.log_buffer {
+            Some(b) => b,
+            None => {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "(log capture not available)",
+                        Style::default().fg(self.theme.inactive),
+                    )),
+                    inner,
+                );
+                return;
+            }
+        };
+
+        let entries = buf.snapshot();
+        let visible_h = inner.height as usize;
+        self.log_overlay_vp.set_dims(entries.len(), visible_h);
+
+        if entries.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "(no log entries yet)",
+                    Style::default().fg(self.theme.inactive),
+                )),
+                inner,
+            );
+            return;
+        }
+
+        let (start, end) = self.log_overlay_vp.visible_range();
+        let lines: Vec<Line> = entries[start..end.min(entries.len())]
+            .iter()
+            .enumerate()
+            .map(|(rel, entry)| {
+                let abs = start + rel;
+                let is_sel = abs == self.log_overlay_vp.selected;
+                let level_color = match entry.level.as_str() {
+                    "ERROR" => self.theme.error,
+                    "WARN" => self.theme.warning,
+                    "INFO" => self.theme.accent_checkout,
+                    _ => self.theme.inactive,
+                };
+                let style = if is_sel {
+                    Style::default()
+                        .fg(level_color)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default().fg(level_color)
+                };
+                let prefix = if is_sel { "▶ " } else { "  " };
+                let text = trunc(
+                    &format!(
+                        "{}{:5} {} {}",
+                        prefix, entry.level, entry.target, entry.text
+                    ),
+                    inner.width as usize,
+                );
+                Line::from(Span::styled(text, style))
+            })
+            .collect();
+
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn render_auth_popup(&mut self, area: Rect, frame: &mut ratatui::Frame) {
+        use ratatui::style::Color;
+        let popup_area = centered_rect(60, 30, area);
+        frame.render_widget(Clear, popup_area);
+
+        let popup = match &self.auth_popup {
+            Some(p) => p,
+            None => return,
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" SSH Authentication ");
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let chunks = ratatui::layout::Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+
+        let prompt_text = Paragraph::new(popup.prompt.as_str())
+            .style(Style::default().fg(self.theme.inactive))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(prompt_text, chunks[0]);
+
+        // Render masked input (show '*' for each character).
+        let masked: String = "*".repeat(popup.input.value.chars().count());
+        let masked_field = InputField::new(&masked);
+        masked_field.render(frame, chunks[1], "Credential", true);
+
+        let hint = Paragraph::new(Span::styled(
+            "Enter to confirm · Esc to cancel",
+            Style::default().fg(self.theme.inactive),
+        ));
+        frame.render_widget(hint, chunks[2]);
     }
 
     /// §7.4 external editor 4-stage flow.
@@ -1339,272 +1761,6 @@ impl App {
     }
 
     fn render_operate(&self, area: Rect, frame: &mut ratatui::Frame) {
-        use ratatui::style::Color;
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border_active))
-            .title(" Operate ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let has_params = matches!(
-            self.operate_operation,
-            OperationKind::Run | OperationKind::Exec | OperationKind::Sync
-        );
-        let param_rows = match self.operate_operation {
-            OperationKind::Run | OperationKind::Exec => 7u16,
-            OperationKind::Sync => {
-                let adhoc_list_rows = self.sync_adhoc_files.len().min(5) as u16;
-                8 + adhoc_list_rows
-            }
-            _ => 0u16,
-        };
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(2),          // OpRadio row
-                Constraint::Length(param_rows), // param panel (0 for check/sync)
-                Constraint::Length(4),          // target row
-                Constraint::Min(0),             // applicable entries / spacer
-                Constraint::Length(3),          // execute button
-            ])
-            .split(inner);
-
-        // Operation selector row (← → to cycle, active selection highlighted).
-        let radio_focused = self.operate_focus == OperateFocus::OpRadio;
-        let ops = [
-            (OperationKind::Check, "check"),
-            (OperationKind::Run, "run"),
-            (OperationKind::Exec, "exec"),
-            (OperationKind::Sync, "sync"),
-        ];
-        let mut spans = vec![Span::raw(" Operation: ")];
-        for (kind, label) in &ops {
-            let selected = *kind == self.operate_operation;
-            let (prefix, suffix) = if selected { ("◉ ", "") } else { ("○ ", "") };
-            let style = if selected && radio_focused {
-                Style::default()
-                    .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-            } else if selected {
-                Style::default()
-                    .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(self.theme.inactive)
-            };
-            spans.push(Span::styled(format!("[{prefix}{label}{suffix}]"), style));
-            spans.push(Span::raw("  "));
-        }
-        if radio_focused {
-            spans.push(Span::styled(
-                " ← → to change",
-                Style::default().fg(self.theme.inactive),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
-
-        // Param panel (run/exec only).
-        if has_params {
-            let param_focused = self.operate_focus == OperateFocus::ParamPanel;
-            let param_area = chunks[1];
-            let param_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3), // text input
-                    Constraint::Length(1), // sudo
-                    Constraint::Length(1), // yes / keep
-                    Constraint::Min(0),
-                ])
-                .split(param_area);
-
-            // Text input field.
-            let field_focused =
-                param_focused && self.param_field == ParamPanelField::CommandOrScript;
-            let (field_label, field) = match self.operate_operation {
-                OperationKind::Run => ("Command", &self.run_command),
-                OperationKind::Exec => ("Script path", &self.exec_script),
-                _ => unreachable!(),
-            };
-            field.render(frame, param_chunks[0], field_label, field_focused);
-
-            // Sudo checkbox.
-            let sudo_focused = param_focused && self.param_field == ParamPanelField::Sudo;
-            let sudo_val = match self.operate_operation {
-                OperationKind::Run => self.run_sudo,
-                OperationKind::Exec => self.exec_sudo,
-                _ => false,
-            };
-            let sudo_style = if sudo_focused {
-                Style::default()
-                    .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(if sudo_val { "[✓] sudo" } else { "[ ] sudo" }, sudo_style),
-                    Span::styled(
-                        "  (Space to toggle)",
-                        Style::default().fg(self.theme.inactive),
-                    ),
-                ])),
-                param_chunks[1],
-            );
-
-            // Second flag: yes (run) or keep (exec).
-            let flag2_focused = param_focused && self.param_field == ParamPanelField::SecondFlag;
-            let (flag2_label, flag2_val) = match self.operate_operation {
-                OperationKind::Run => ("--yes (skip confirmation)", self.run_yes),
-                OperationKind::Exec => ("--keep (keep script after exec)", self.exec_keep),
-                _ => ("", false),
-            };
-            let flag2_style = if flag2_focused {
-                Style::default()
-                    .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        if flag2_val {
-                            format!("[✓] {flag2_label}")
-                        } else {
-                            format!("[ ] {flag2_label}")
-                        },
-                        flag2_style,
-                    ),
-                ])),
-                param_chunks[2],
-            );
-
-            // Dim border around the whole panel.
-            let _ = Color::DarkGray; // used below
-        }
-
-        // Sync param panel.
-        if self.operate_operation == OperationKind::Sync && has_params {
-            let param_focused = self.operate_focus == OperateFocus::ParamPanel;
-            let param_area = chunks[1];
-
-            // Mode toggle row.
-            let mode_focused = param_focused && self.param_field == ParamPanelField::SyncModeToggle;
-            let mode_label = match self.sync_mode {
-                SyncMode::ConfigEntries => "◉ Config entries  ○ Ad-hoc files",
-                SyncMode::AdHoc => "○ Config entries  ◉ Ad-hoc files",
-            };
-            let mode_style = if mode_focused {
-                Style::default()
-                    .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-
-            // Ad-hoc input row.
-            let adhoc_input_focused =
-                param_focused && self.param_field == ParamPanelField::SyncAdHocInput;
-            let dry_run_focused = param_focused && self.param_field == ParamPanelField::SyncDryRun;
-
-            let adhoc_list_rows = self.sync_adhoc_files.len().min(5) as u16;
-            let sync_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),                      // mode toggle
-                    Constraint::Length(1),                      // blank
-                    Constraint::Length(3),                      // adhoc input (or info line)
-                    Constraint::Length(adhoc_list_rows.max(1)), // adhoc list
-                    Constraint::Length(1),                      // dry-run toggle
-                    Constraint::Min(0),
-                ])
-                .split(param_area);
-
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw("  Mode: "),
-                    Span::styled(mode_label, mode_style),
-                    Span::styled(
-                        "  (Space to toggle)",
-                        Style::default().fg(self.theme.inactive),
-                    ),
-                ])),
-                sync_chunks[0],
-            );
-
-            // Ad-hoc input (shown even in ConfigEntries mode as grayed-out hint).
-            if self.sync_mode == SyncMode::AdHoc {
-                self.sync_adhoc_input.render(
-                    frame,
-                    sync_chunks[2],
-                    "Add path (Enter=add, Del=remove last)",
-                    adhoc_input_focused,
-                );
-                // File list.
-                let list_lines: Vec<Line> = if self.sync_adhoc_files.is_empty() {
-                    vec![Line::from(Span::styled(
-                        "  (no paths — type above and press Enter)",
-                        Style::default().fg(self.theme.inactive),
-                    ))]
-                } else {
-                    self.sync_adhoc_files
-                        .iter()
-                        .rev()
-                        .take(5)
-                        .map(|p| Line::from(format!("  · {p}")))
-                        .collect()
-                };
-                frame.render_widget(Paragraph::new(list_lines), sync_chunks[3]);
-            } else {
-                frame.render_widget(
-                    Paragraph::new(Span::styled(
-                        "  (using [[sync]] config entries)",
-                        Style::default().fg(self.theme.inactive),
-                    )),
-                    sync_chunks[2],
-                );
-            }
-
-            // Dry-run toggle.
-            let dry_style = if dry_run_focused {
-                Style::default()
-                    .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        if self.sync_dry_run {
-                            "[✓] dry-run"
-                        } else {
-                            "[ ] dry-run"
-                        },
-                        dry_style,
-                    ),
-                    Span::styled(
-                        "  (Space to toggle)",
-                        Style::default().fg(self.theme.inactive),
-                    ),
-                ])),
-                sync_chunks[4],
-            );
-        }
-
-        // Target row.
-        let target_focused = self.operate_focus == OperateFocus::TargetRow;
-        let mode_summary = match self.target_filter.mode {
-            TargetFilterMode::All => "all hosts".to_string(),
-            TargetFilterMode::Groups => format!("groups:{}", self.target_filter.groups.join(",")),
-            TargetFilterMode::Hosts => format!("hosts:{}", self.target_filter.hosts.join(",")),
-            TargetFilterMode::Shell => format!("shell:{:?}", self.target_filter.shell),
-        };
         let target_count = match resolve_target_names(
             &build_target_mode(&self.target_filter, &self.config),
             &self.config,
@@ -1612,194 +1768,51 @@ impl App {
             Ok(t) => t.len(),
             Err(_) => 0,
         };
-        let target_text = format!(
-            " Target: {}  ({} hosts)    [f] Filter   serial={}   timeout={}s",
-            mode_summary, target_count, self.target_filter.serial, self.target_filter.timeout,
-        );
-        let target_p = Paragraph::new(target_text).style(if target_focused {
-            Style::default()
-                .fg(self.theme.accent_operate)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        });
-        frame.render_widget(target_p, chunks[2]);
-
-        // Applicable entries panel — read-only summary for check/sync.
-        if self.operate_operation == OperationKind::Check {
-            let mut lines: Vec<Line> = Vec::new();
-            lines.push(Line::from(Span::styled(
-                "─ Applicable [[check]] entries ─",
-                Style::default().fg(self.theme.inactive),
-            )));
-            if self.config.check.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (no [[check]] entries — add one to config.toml)",
-                    Style::default().fg(self.theme.inactive),
-                )));
-            } else {
-                for (i, entry) in self.config.check.iter().enumerate().take(6) {
-                    let label = entry
-                        .name
-                        .clone()
-                        .filter(|n| !n.is_empty())
-                        .unwrap_or_else(|| format!("Check #{}", i + 1));
-                    let metrics = if entry.enabled.is_empty() {
-                        "(no metrics)".to_string()
-                    } else {
-                        entry.enabled.join(",")
-                    };
-                    let groups = if entry.groups.is_empty() {
-                        "unscoped".to_string()
-                    } else {
-                        format!("groups:[{}]", entry.groups.join(","))
-                    };
-                    lines.push(Line::from(format!(
-                        "  ▸ {} — {}  metrics:{}",
-                        label, groups, metrics
-                    )));
-                }
-                if self.config.check.len() > 6 {
-                    lines.push(Line::from(format!(
-                        "  ... ({} more not shown)",
-                        self.config.check.len() - 6
-                    )));
-                }
-            }
-            let panel = Paragraph::new(lines).wrap(Wrap { trim: false });
-            frame.render_widget(panel, chunks[3]);
-        } else if self.operate_operation == OperationKind::Sync
-            && self.sync_mode == SyncMode::ConfigEntries
-        {
-            let mut lines: Vec<Line> = Vec::new();
-            lines.push(Line::from(Span::styled(
-                "─ Applicable [[sync]] entries ─",
-                Style::default().fg(self.theme.inactive),
-            )));
-            if self.config.sync.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (no [[sync]] entries — add one to config.toml)",
-                    Style::default().fg(self.theme.inactive),
-                )));
-            } else {
-                for entry in self.config.sync.iter().take(6) {
-                    let paths = entry
-                        .paths
-                        .iter()
-                        .take(3)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let groups = if entry.groups.is_empty() {
-                        "unscoped".to_string()
-                    } else {
-                        format!("groups:[{}]", entry.groups.join(","))
-                    };
-                    let src = entry
-                        .source
-                        .as_deref()
-                        .map(|s| format!("  src:{s}"))
-                        .unwrap_or_default();
-                    lines.push(Line::from(format!("  ▸ {}  {}{}", paths, groups, src)));
-                }
-                if self.config.sync.len() > 6 {
-                    lines.push(Line::from(format!(
-                        "  ... ({} more not shown)",
-                        self.config.sync.len() - 6
-                    )));
-                }
-            }
-            let panel = Paragraph::new(lines).wrap(Wrap { trim: false });
-            frame.render_widget(panel, chunks[3]);
-        }
-
-        // [Execute] button.
-        let execute_focused = self.operate_focus == OperateFocus::Execute;
-        let op_name = match self.operate_operation {
-            OperationKind::Check => "check",
-            OperationKind::Run => "run",
-            OperationKind::Exec => "exec",
-            OperationKind::Sync => "sync",
+        let data = OperateRenderData {
+            focus: self.operate_focus,
+            operation: self.operate_operation,
+            sync_mode: self.sync_mode,
+            sync_dry_run: self.sync_dry_run,
+            sync_adhoc_files: &self.sync_adhoc_files,
+            sync_adhoc_input: &self.sync_adhoc_input,
+            run_command: &self.run_command,
+            exec_script: &self.exec_script,
+            run_sudo: self.run_sudo,
+            run_yes: self.run_yes,
+            exec_sudo: self.exec_sudo,
+            exec_keep: self.exec_keep,
+            param_field: self.param_field,
+            entries_scroll: self.entries_scroll,
+            config: &self.config,
+            theme: &self.theme,
+            is_running: self.running_op.is_some(),
+            target_filter: &self.target_filter,
+            target_count,
         };
-        let exec_label = if self.running_op.is_some() {
-            " [ running... — Esc to cancel ] ".to_string()
-        } else {
-            format!(" [ Execute {op_name} (Enter) ] ")
-        };
-        let exec_style = if execute_focused && self.running_op.is_none() {
-            Style::default()
-                .fg(self.theme.accent_operate)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-        } else if self.running_op.is_some() {
-            Style::default().fg(self.theme.warning)
-        } else {
-            Style::default().fg(self.theme.inactive)
-        };
-        let exec = Paragraph::new(Line::from(Span::styled(exec_label, exec_style)))
-            .block(Block::default().borders(Borders::TOP));
-        frame.render_widget(exec, chunks[4]);
+        operate_tab::render_operate(&data, area, frame);
     }
 
     fn render_progress_popup(&self, area: Rect, frame: &mut ratatui::Frame) {
-        let popup_area = centered_rect(70, 70, area);
-        frame.render_widget(Clear, popup_area);
+        let Some(op) = &self.running_op else {
+            return;
+        };
         let op_name = match self.operate_operation {
             OperationKind::Check => "check",
             OperationKind::Run => "run",
             OperationKind::Exec => "exec",
             OperationKind::Sync => "sync",
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border_active))
-            .title(format!(" Running {op_name} — Esc to cancel "));
-        let inner = block.inner(popup_area);
-        frame.render_widget(block, popup_area);
-
-        let Some(op) = &self.running_op else {
-            return;
-        };
-        let mut lines: Vec<Line> = Vec::new();
-        let elapsed = op.started_at.elapsed().as_secs();
-        lines.push(Line::from(format!(
-            "Targets: {}    Completed: {}    Elapsed: {}s",
-            op.targets.len(),
+        operate_tab::render_progress_popup(
+            &self.theme,
+            op_name,
+            &op.host_outcomes,
+            &op.targets,
+            op.started_at.elapsed().as_secs(),
             op.completed_count(),
-            elapsed,
-        )));
-        lines.push(Line::from(""));
-
-        // Show last 12 outcomes.
-        let take = 12;
-        let start = op.host_outcomes.len().saturating_sub(take);
-        for (host, status, detail, ms) in &op.host_outcomes[start..] {
-            let glyph = match status {
-                HostStatus::Online => "✓",
-                HostStatus::Partial => "⚠",
-                HostStatus::Offline => "✗",
-                HostStatus::Unreachable => "⊘",
-                HostStatus::TimedOut => "⏱",
-                HostStatus::Error => "✗",
-                HostStatus::Skipped => "⊘",
-            };
-            let color = match status {
-                HostStatus::Online => self.theme.accent_checkout,
-                HostStatus::Partial => self.theme.warning,
-                HostStatus::Skipped => self.theme.inactive,
-                _ => self.theme.error,
-            };
-            let line = format!(
-                "  {} {:<16} ({:>4}ms) — {}",
-                glyph,
-                truncate(host, 16),
-                ms,
-                truncate(detail, 60),
-            );
-            lines.push(Line::from(Span::styled(line, Style::default().fg(color))));
-        }
-
-        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(p, inner);
+            self.progress_popup_scroll,
+            area,
+            frame,
+        );
     }
 
     fn render_results_popup(&self, area: Rect, frame: &mut ratatui::Frame, report: &CommandReport) {
@@ -2086,9 +2099,11 @@ impl App {
         }
 
         let hints = match self.active_tab {
-            TabId::Config => "↑↓/jk:Rows  ←→:Zones  E:EditInEditor  1/2/3:Tabs  ?:Help  q:Quit",
-            TabId::Operate => "1/2/3:Tabs  Tab:Cycle  f:Filter  ?:Help  q:Quit",
-            TabId::Checkout => "↑↓/jk:Rows  PgUp/PgDn  Home/End  Tab:Cycle  ?:Help  q:Quit",
+            TabId::Config => {
+                "↑↓:Rows ←→:Zones e:Edit E:Editor S:Save a:Add d:Del L:Log i:Info ?:Help q:Quit"
+            }
+            TabId::Operate => "↑↓:Zones ←→:OpType f:Filter L:Log i:Info ?:Help q:Quit",
+            TabId::Checkout => "↑↓/jk:Rows PgUp/PgDn Home/End f:Filter L:Log i:Info ?:Help q:Quit",
         };
         let p = Paragraph::new(Line::from(vec![Span::styled(
             hints,
@@ -2098,7 +2113,7 @@ impl App {
     }
 
     fn render_help_popup(&self, area: Rect, frame: &mut ratatui::Frame) {
-        let popup_area = centered_rect(60, 60, area);
+        let popup_area = centered_rect(60, 70, area);
         frame.render_widget(Clear, popup_area);
         let body = "\
 Global keys
@@ -2109,6 +2124,8 @@ Global keys
   Ctrl+C      Quit immediately (state saved)
   Esc         Close popup / clear error
   ?           Toggle this help
+  L           Toggle log overlay
+  i           Toggle contextual info popup
 
 Operate tab
   ↑↓ / j k   Navigate zones: OpRadio → ParamPanel → TargetRow → Execute
@@ -2144,7 +2161,17 @@ Config tab
   Tab         Switch zone (Sidebar → FieldTable)
   PgUp/PgDn   Page navigation
   Home/End    Jump to top / bottom
+  e / Enter   Edit focused field inline (scalar / form)
+  a           Add new entry (host / check / sync)
+  d           Delete focused entry
+  S           Save config (format-preserving via toml_edit)
   E           Open config in $VISUAL/$EDITOR (TUI suspends, reloads on change)
+
+Log overlay
+  L           Open / close
+  ↑↓ / j k    Scroll
+  PgUp/PgDn   Page navigation
+  Home/End    Jump to top / bottom
 ";
         let block = Block::default()
             .borders(Borders::ALL)
@@ -2202,25 +2229,6 @@ fn resolve_target_names(mode: &TargetMode, config: &AppConfig) -> anyhow::Result
             .collect(),
     };
     Ok(names)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    if s.width() <= max {
-        return s.to_string();
-    }
-    let mut w = 0;
-    let mut out = String::new();
-    for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if w + cw > max.saturating_sub(1) {
-            break;
-        }
-        out.push(ch);
-        w += cw;
-    }
-    out.push('…');
-    out
 }
 
 /// Spawn a background task that listens for OS signals and pushes a unit into
