@@ -8,11 +8,6 @@ description = "SSH-config-based cross-platform remote management tool"
 name = "ssync"
 path = "src/main.rs"
 
-[[bin]]
-name = "ssync-tui"
-path = "src/main.rs"
-required-features = ["tui"]
-
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -27,6 +22,9 @@ toml_edit = "0.22"
 
 # Password input
 rpassword = "7"
+
+# Credential zeroization
+zeroize = "1"
 
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -74,5 +72,5 @@ serde_json = "1"
 unicode-width = "0.1"
 
 [features]
-default = []
+default = ["tui"]
 tui = ["ratatui", "crossterm", "tokio-util"]
