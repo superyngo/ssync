@@ -5,9 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 2026-05-06
+
+### Changed
+- **Binary unified**: `ssync` now launches TUI directly when invoked with no subcommand; `ssync-tui` binary removed.
+
+### Added
+- **Full arrow-key navigation**: pressing ↑ at the top of any tab escapes to the tab NavBar; ←/→ switches tabs; ↓/Enter returns to content.
+
+### Fixed
+- Config: pressing `Esc` while editing a scalar field now correctly exits edit mode.
+- Config: global hotkeys (`q`, etc.) are suspended while a config field is being edited.
+- Config: pressing `e` on Vec-type fields (`paths`, `groups`, `enabled`) now opens the entry form vec editor.
+- Config: `VecEditorState.input_active` canonical flag used consistently.
+- Operate: pressing ↑ from the Applicable Entries panel at scroll position 0 now escapes to Target Row.
+- Operate: entering Applicable Entries from Execute (↑) now scrolls to the bottom of the list.
+
 ## [Unreleased]
 
 ### Added
+- feat(tui): Phase 0–7 gap fixes — CI, operate_tab extraction, scroll, conflict detection, tests (2026-05-06)
+  - `ci.yml`: new CI workflow triggers on pushes to `main` and `feat/tui`; runs fmt/clippy/test/build for both headless and tui features.
+  - `release.yml`: builds `ssync-tui` binary alongside `ssync` for every platform; uploads both as separate artifacts.
+  - `operate_tab.rs`: extracted operate rendering (`render_operate`, `render_progress_popup`, `render_applicable_entries`) and types (`OperateFocus`, `ParamPanelField`) into `src/tui/tabs/operate_tab.rs` per plan §2.1.
+  - `check_core_empty_config_returns_no_hosts_error`: §20.1.1 unit test with stub `ProgressSink`; verifies zero-host config returns error without network calls.
+  - `OperateFocus::ApplicableEntries`: focus zone for Applicable Entries panel with 6-row page scroll.
+  - Progress popup user-controlled scroll: Up/Down keys scroll the progress popup; auto-scroll resumes at bottom.
+  - Ad-hoc mode banner: rendered when `sync_mode = AdHoc` (B3 acceptance test).
+  - `detect_sync_source_conflicts`: warns when multiple `[[sync]]` entries share the same `source` path (§12.3).
+  - T-WB-1: `t_wb_1_delete_check_entry` — delete one of two `[[check]]` entries; assert one remains and `[[host]]`/`[settings]` survive.
+  - T-WB-4: `t_wb_4_delete_host_entry` — delete one of two `[[host]]` entries; assert one remains and `[[check]]`/`[settings]` survive.
+
+- feat(tui): Phase 7 items 4/5/9/10 — TriBool radio for `propagate_deletes`, group picker popup, dirty-guard before external editor, Phase 7 keybinding docs (2026-05-06)
+  - `FieldKind::TriBool` variant cycles `inherit → yes → no` via ←/→/Enter; replaces free-text `OptionalString` for `propagate_deletes` in sync form and sync descriptor.
+  - `GroupPickerState` + `group_picker` field on `EntryFormState`; pressing Enter/e on a `groups` field opens a checkbox picker showing all known groups across config; Space toggles, Enter/s applies, Esc cancels.
+  - `ConfirmAction::OpenEditorDirty` + `pending_open_editor` flag; pressing `E` with unsaved changes now shows a confirm dialog before opening the external editor.
+  - `ConfirmState.hints` field added; all confirm dialogs pass custom hint text; `render_confirm` uses `confirm.hints` instead of hardcoded string.
+  - Fixed vec_editor Esc bug: `field_index` now read from `ve` (taken) not `form.vec_editor` (already None).
+  - `README.md` keybindings table updated to Phase 7 with full key list and `toml_edit` note.
+
+
+- feat(tui): SSH auth popup (Phase 7 item 8, ADR ssh-auth-tui-popup) — interactive passphrase/password prompts routed through the TUI instead of blocking terminal I/O
+  - `host::auth`: `SshAuthRequest`/`SshAuthSender` types; `authenticate()` now takes `Option<&SshAuthSender>`; uses oneshot channel handshake with 120s timeout when sender is present, falls back to `rpassword` otherwise; credentials are zeroized after use via `zeroize` crate.
+  - `host::session_pool`: `RusshSessionPool::setup()` accepts `Option<SshAuthSender>`; auth sender threaded through `connect_one` → `connect_direct`/`connect_via_proxy` → `authenticate`.
+  - `host::pool`: `SshPool::setup()` and `SshPool::setup_with_options()` accept `Option<SshAuthSender>` and forward it to the session pool.
+  - `commands::*`: `Context.tui_auth_sender` field added; `from_tui_parts()` accepts the sender; all `SshPool::setup*` call sites pass `ctx.tui_auth_sender.clone()`.
+  - `tui::async_bridge`: `TuiEvent::SshAuthRequired(SshAuthRequest)` variant added; `Clone` removed from `TuiEvent` (non-clonable due to oneshot sender).
+  - `tui::app`: `AuthPopup` state struct; `App.auth_popup` and `App.auth_bridge_tx` fields; bridge task spawned in `run()` converts `SshAuthRequest` → `TuiEvent::SshAuthRequired`; auth popup key routing inserted above all other focus logic; masked credential input rendered as overlay popup.
+  - Cargo.toml: `zeroize = "1"` added.
+
+- Phase 7 (§19) remaining items — log buffer population + UI text updates:
+  - `tui::log_layer` module: `RingBufferLayer` tracing subscriber layer captures events into `Arc<Mutex<VecDeque<LogEntry>>>` ring buffer (capped at 500 entries per §17.2). `LogBufferHandle` provides `push`, `snapshot`, and `len` for the overlay to read.
+  - `init_tracing` in `main.rs` refactored to use `tracing_subscriber::Registry` + `Layer` composition. In TUI mode, both the ring-buffer layer and a fmt layer (writer = `std::io::sink`) are installed; in CLI mode, only the fmt layer is installed. The `LogBufferHandle` is threaded through `entry::run_or_fallback` → `App::from_context`.
+  - `App.log_buffer` changed from `Vec<LogEntry>` to `Option<LogBufferHandle>` backed by the shared ring buffer; `render_log_overlay` snapshots the handle for rendering.
+  - Status bar hints updated per tab: Config adds `e:Edit S:Save a:Add d:Del L:Log i:Info`; Operate adds `L:Log i:Info`; Checkout adds `L:Log i:Info`.
+  - Help popup (`?`) expanded to cover all current keybindings: global keys (L log, i info), Config tab (e edit, a add, d delete, S save), and Log overlay navigation.
+  - `tracing-subscriber` Cargo.toml feature set updated to `["env-filter", "registry"]`.
+  - SSH auth popup (Phase 7 item 8) explicitly deferred pending ADR — per §19 hard gate, no implementation until a committed architecture decision record specifies the russh callback hooks, oneshot channel handshake, timeout, and credential lifetime constraints.
+
+- Phase 4 (§19) Config tab 3-level read-only browser + external editor: sidebar (Settings / Hosts / Checks / Syncs) ↔ FieldTable via ←→; breadcrumb tracks section → entry → field. `E` triggers full 4-stage suspend/resume flow (`$VISUAL`→`$EDITOR`→vi/notepad); `config_mtime` detects file changes and triggers reload + 2s yellow "Config reloaded" banner.
+
+- Phase 7 (§19) Config tab editable + log overlay:
+  - `tui::tabs::config_tab` rewritten with `FieldDescriptor`/`FieldKind` typed field system, `EntryFormState` for add/edit entry popups, `VecEditorState` for Vec fields, `ConfirmState` for delete/discard confirmations.
+  - Inline scalar edit on field table (e/Enter activates, Enter commits, Esc cancels with restore). Dirty tracking via `config_dirty` flag.
+  - Entry forms: `a` adds new host/check/sync entry, `e` on sidebar edits existing entry, `s` in form saves, Esc cancels (with dirty guard).
+  - `d` on sidebar requests delete with y/n confirmation dialog.
+  - `S` saves config to disk via `toml_edit` round-trip preserving unknown keys/comments; `reload_banner_until` shows confirmation for 2 seconds.
+  - `apply_config_to_doc` in `config::app` extended with `write_array_of_tables`, `write_string_array`, `write_check_paths` for full `[[host]]`/`[[check]]`/`[[sync]]` write-back.
+  - Dirty guard on tab switch: 1/2/3/Tab blocked when config has unsaved changes.
+  - Log overlay (`L` key): togglable popup showing in-memory `LogEntry` ring buffer with scroll.
+  - `trunc` helper made `pub(crate)` for cross-module use; `InputField::saved` field made pub for dirty comparison.
+  - `SidebarItem` enum and `sidebar_vp`/`items` fields made pub on `ConfigTabState` for App access.
+
 - Phase 5 (§19) Operate tab run/exec support:
   - `HostStatus::Skipped` variant added to `commands::report` (used for exec shell-mismatch).
   - `RunHostResult`, `RunReport`, `ExecHostResult`, `ExecReport` structs + `CommandReport::Run` / `CommandReport::Exec` variants in `commands::report`.
@@ -37,6 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `default_output_format` config setting to set default report format when `--out` path has no extension
 - Per-host raw output JSON in HTML reports via collapsible details
 - Auto-generated report filenames now respect `default_output_format`
+- `--config/-c` global option to specify an alternative config file path
+- `--files/-f` for ad-hoc file sync without config; push-missing is now the default behavior (`--no-push-missing` to disable)
+- Enhanced checkout TUI and `--format table` output with CPU Load, Memory, Disk, Battery, and Last Seen columns (Memory/Disk >90% highlighted in red)
 
 ### Changed
 - CLI short flags reassigned for consistency: `--shell/-s`, `run|exec --sudo/-S`, `sync --source/-S`
@@ -47,6 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Raw probe output strings now use move instead of clone for efficiency
 - Unified `Utc::now()` timestamp handling in check command
+- `sync -f ~/path` no longer sends shell-expanded absolute path to remote hosts — converts back to `~/path` so each host resolves relative to its own home directory
+- When all reachable hosts are in sync but some hosts are missing the file, sync reason now reads "in sync on reachable hosts, pushing to N missing" instead of misleading "newest mtime: X, +N missing"
+- Three-level status display in check: all-failed shows `✗ failed`, partial shows `⊘ partial`, all-success shows `✓ collected` (previously SSH failures still showed green `✓ collected`)
+- Per-target upload error handling — a failed upload to one host no longer aborts the entire sync operation
+- `mkdir -p` before upload correctly handles `~/`-prefixed paths using `$HOME` expansion instead of literal `'~'`
 
 ## [v0.7.3] - 2026-04-28
 

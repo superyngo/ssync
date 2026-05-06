@@ -8,7 +8,7 @@ SSH-config-based cross-platform remote management tool.
 - **System Snapshots**: Collect and store system information for historical tracking
 - **File Synchronization**: Sync files across multiple hosts using collect-decide-distribute model
 - **Remote Execution**: Run commands or scripts on multiple hosts in parallel
-- **TUI Interface**: Interactive terminal UI (`ssync-tui`) for browsing snapshot data, configuring filters, and running checks
+- **TUI Interface**: Interactive terminal UI (`ssync`) for browsing snapshot data, configuring filters, and running checks
 
 ## Installation
 
@@ -34,23 +34,22 @@ cargo install --path .
 
 ## Binaries
 
-Two binaries are produced. Source builds default to headless; release downloads include both.
+One binary is produced. Source builds default to headless; release downloads include a TUI-enabled build.
 
 | Binary | Built with | What it does |
 |--------|-----------|--------------|
-| `ssync` | always | All CLI subcommands. Invoked without a subcommand → prints "Interactive TUI not available" and exits 1. |
-| `ssync-tui` | `--features tui` | Interactive TUI when launched on a TTY. All CLI subcommands also work. Piped or under `TERM=dumb` → prints help and exits 2. |
+| `ssync` | always | All CLI subcommands. Invoked without a subcommand → launches TUI (if built with `--features tui`), otherwise prints "Interactive TUI not available" and exits 1. |
 
 ```bash
 cargo build --bin ssync                            # headless
-cargo build --bin ssync-tui --features tui         # TUI build
+cargo build --bin ssync --features tui             # TUI build
 ```
 
-> Running multiple `ssync-tui` instances against the same config simultaneously
+> Running multiple `ssync` instances against the same config simultaneously
 > is not supported; they share a single state file with last-write-wins
 > semantics.
 
-## TUI keybindings (Phase 4)
+## TUI keybindings (Phase 7)
 
 | Scope | Key | Action |
 |-------|-----|--------|
@@ -60,20 +59,31 @@ cargo build --bin ssync-tui --features tui         # TUI build
 | Global | `Esc` | Close popup / clear error / cancel running op |
 | Global | `?` | Toggle keybindings help popup |
 | Global | `i` | Toggle contextual info popup |
+| Global | `L` | Toggle log overlay |
 | Config | `↑` `↓` `j` `k` | Move within sidebar or field table |
-| Config | `←` / `→` | Switch zones: Sidebar ↔ FieldTable |
+| Config | `←` / `→` | Switch zones (Sidebar ↔ FieldTable); also cycles radio/toggle fields |
 | Config | `Tab` | Sidebar → FieldTable (within Config tab only) |
 | Config | `PgUp` `PgDn` `Home` `End` | Page / jump navigation |
-| Config | `E` | Open config file in `$VISUAL` / `$EDITOR` / `vi` — TUI suspends and resumes; config reloads if the file was modified |
-| Operate | `↑` / `↓` (or `j`/`k`) | Move between Target row and `[Execute]` |
+| Config | `e` / `Enter` | Edit selected field inline; cycle radio fields; open group picker for `groups` |
+| Config | `E` | Open config file in `$VISUAL` / `$EDITOR` / `vi` — prompts if unsaved changes; reloads on change |
+| Config | `S` | Save config (preserves comments and unknown keys via `toml_edit`) |
+| Config | `a` | Add new entry (host / check / sync based on sidebar selection) |
+| Config | `d` | Delete selected entry (with confirmation) |
+| Config (group picker) | `Space` | Toggle group selection |
+| Config (group picker) | `Enter` / `s` | Apply group selection |
+| Config (group picker) | `Esc` | Cancel group picker |
+| Operate | `↑` / `↓` (or `j`/`k`) | Move between zones |
+| Operate | `←` / `→` | Cycle operation radio (check / run / exec / sync) |
 | Operate | `f` | Open Target Filter popup |
-| Operate | `Enter` on `[Execute]` | Run the `check` operation |
+| Operate | `Enter` on `[Execute]` | Run the selected operation |
 | Operate | `Tab` / `Shift+Tab` | Cycle tabs (Operate and Checkout only) |
 | Checkout | `↑` `↓` `j` `k` | Move row selection |
 | Checkout | `PgUp` `PgDn` `Home` `End` | Page / jump navigation |
 | Checkout | `Tab` / `Shift+Tab` | Cycle tabs |
 
 > **Note:** On the Config tab, `Tab` switches between the Sidebar and FieldTable zones rather than cycling to the next tab. Use `1` / `2` / `3` to switch tabs from Config.
+>
+> **toml_edit comment preservation:** `S` saves config using `toml_edit`, which preserves all comments and unknown keys. The one known limitation: when an entry (host/check/sync) is deleted, any inline comments attached to that entry's keys are lost. All other comments survive edits.
 
 ## Usage
 
