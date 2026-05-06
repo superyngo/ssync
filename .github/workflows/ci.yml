@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/tui
+  pull_request:
+    branches:
+      - main
+      - feat/tui
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check / Clippy / Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy (headless)
+        run: cargo clippy -- -D warnings
+
+      - name: cargo clippy (tui feature)
+        run: cargo clippy --features tui -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo test (headless)
+        run: cargo test
+
+      - name: cargo test (tui feature)
+        run: cargo test --features tui
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo build (headless)
+        run: cargo build
+
+      - name: cargo build (tui feature)
+        run: cargo build --features tui

@@ -850,8 +850,6 @@ pub async fn sync_core(
                                 }
                             }
                         }
-                    } else if dirs_missing.contains(path) {
-                        new_paths.push(path.clone());
                     } else {
                         new_paths.push(path.clone());
                     }

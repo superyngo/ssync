@@ -50,8 +50,11 @@ pub enum FieldKind {
     Bool,
     String,
     OptionalString,
-    Enum { variants: Vec<&'static str> },
+    Enum {
+        _variants: Vec<&'static str>,
+    },
     VecString,
+    #[allow(dead_code)]
     VecCheckPath,
     ShellEnum,
     TriBool, // Option<bool>: "inherit" | "yes" | "no"
@@ -514,14 +517,11 @@ impl ConfigTabState {
                     true
                 }
                 KeyCode::Enter => {
-                    let item = self.items.get(self.sidebar_vp.selected).cloned();
-                    if let Some(item) = item {
-                        match item {
-                            SidebarItem::Host(_) | SidebarItem::Check(_) | SidebarItem::Sync(_) => {
-                                self.zone = ConfigZone::FieldTable;
-                            }
-                            _ => {}
-                        }
+                    if let Some(
+                        SidebarItem::Host(_) | SidebarItem::Check(_) | SidebarItem::Sync(_),
+                    ) = self.items.get(self.sidebar_vp.selected).cloned()
+                    {
+                        self.zone = ConfigZone::FieldTable;
                     }
                     true
                 }
@@ -592,7 +592,8 @@ impl ConfigTabState {
                                 let target_key = f.key.clone();
                                 self.start_edit_entry(config);
                                 if let Some(ref mut form) = self.entry_form {
-                                    let target = form.fields.iter().position(|fd| fd.key == target_key);
+                                    let target =
+                                        form.fields.iter().position(|fd| fd.key == target_key);
                                     if let Some(pos) = target {
                                         form.field_vp = Viewport::new();
                                         form.field_vp.set_dims(form.fields.len().max(1), 0);
@@ -621,11 +622,9 @@ impl ConfigTabState {
     ) -> bool {
         if input.mode == InputMode::Active {
             input.handle_key(key);
-            if input.mode == InputMode::Normal {
-                if input.value != input.saved {
-                    self.commit_inline_edit(&input.value, config);
-                    self.config_dirty = true;
-                }
+            if input.mode == InputMode::Normal && input.value != input.saved {
+                self.commit_inline_edit(&input.value, config);
+                self.config_dirty = true;
             }
             return true;
         }
@@ -694,8 +693,8 @@ impl ConfigTabState {
         {
             let mut ve = self.entry_form.as_mut().unwrap().vec_editor.take().unwrap();
             let handled = self.handle_vec_editor_key(key, &mut ve);
-            if self.entry_form.is_some() {
-                self.entry_form.as_mut().unwrap().vec_editor = Some(ve);
+            if let Some(form) = self.entry_form.as_mut() {
+                form.vec_editor = Some(ve);
             }
             return handled;
         }
@@ -715,8 +714,8 @@ impl ConfigTabState {
                 .unwrap();
             let handled = self.handle_group_picker_key(key, &mut gp);
             if !gp.closing {
-                if self.entry_form.is_some() {
-                    self.entry_form.as_mut().unwrap().group_picker = Some(gp);
+                if let Some(form) = self.entry_form.as_mut() {
+                    form.group_picker = Some(gp);
                 }
             }
             return handled;
@@ -1528,7 +1527,7 @@ impl ConfigTabState {
             Some(SidebarItem::Host(i)) => config
                 .host
                 .get(*i)
-                .map(|h| host_descriptors(h))
+                .map(host_descriptors)
                 .unwrap_or_default(),
             Some(SidebarItem::SectionChecks) => {
                 vec![FieldDescriptor::readonly(
@@ -1539,7 +1538,7 @@ impl ConfigTabState {
             Some(SidebarItem::Check(i)) => config
                 .check
                 .get(*i)
-                .map(|c| check_descriptors(c))
+                .map(check_descriptors)
                 .unwrap_or_default(),
             Some(SidebarItem::SectionSyncs) => {
                 vec![FieldDescriptor::readonly(
@@ -1550,7 +1549,7 @@ impl ConfigTabState {
             Some(SidebarItem::Sync(i)) => config
                 .sync
                 .get(*i)
-                .map(|s| sync_descriptors(s))
+                .map(sync_descriptors)
                 .unwrap_or_default(),
         }
     }
@@ -1744,10 +1743,7 @@ fn build_sidebar_items(config: &AppConfig) -> Vec<SidebarItem> {
     items
 }
 
-fn sidebar_item_display<'a>(
-    item: &SidebarItem,
-    config: &'a AppConfig,
-) -> (&'static str, String, bool) {
+fn sidebar_item_display(item: &SidebarItem, config: &AppConfig) -> (&'static str, String, bool) {
     match item {
         SidebarItem::SectionSettings => ("", "Settings".to_string(), true),
         SidebarItem::SectionHosts => ("", format!("Hosts ({})", config.host.len()), true),
@@ -1780,7 +1776,7 @@ fn settings_descriptors(s: &Settings) -> Vec<FieldDescriptor> {
             "conflict_strategy",
             format!("{:?}", s.conflict_strategy).to_lowercase(),
             FieldKind::Enum {
-                variants: vec!["newest", "skip"],
+                _variants: vec!["newest", "skip"],
             },
         ),
         FieldDescriptor::scalar(

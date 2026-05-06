@@ -95,10 +95,12 @@ impl Viewport {
         (self.scroll_y, end)
     }
 
+    #[allow(dead_code)]
     pub fn at_top(&self) -> bool {
         self.selected == 0
     }
 
+    #[allow(dead_code)]
     pub fn at_bottom(&self) -> bool {
         self.item_count == 0 || self.selected + 1 == self.item_count
     }

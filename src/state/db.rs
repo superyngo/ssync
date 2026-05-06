@@ -21,6 +21,7 @@ pub fn state_dir() -> Result<PathBuf> {
 }
 
 /// Returns the path to ssync.db.
+#[allow(dead_code)]
 pub fn db_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("ssync.db"))
 }

@@ -35,6 +35,7 @@ pub enum TuiEvent {
 }
 
 /// Channel capacity — covers ~500 hosts × 2 events with headroom (§18.1).
+#[allow(dead_code)]
 pub const CHANNEL_CAPACITY: usize = 1024;
 
 /// Handle to a currently-running operation (per §18.2).
@@ -95,6 +96,7 @@ impl ProgressSink for EventSender {
 /// Bounded variant for callers that need backpressure. The current MVP uses
 /// the unbounded sender for simplicity; bounded support is reserved for
 /// future per-line streaming (Phase 8).
+#[allow(dead_code)]
 pub struct BoundedEventSender {
     pub tx: Sender<TuiEvent>,
 }

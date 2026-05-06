@@ -110,6 +110,7 @@ impl ShellMode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_shell_type(s: ShellType) -> Self {
         match s {
             ShellType::Sh => ShellMode::Sh,

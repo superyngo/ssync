@@ -8,6 +8,8 @@
 //!   `at_boundary(dir)` so the dispatch table in `Focusable::handle_arrow`
 //!   can decide between "move within element" and "escape to parent".
 
+#![allow(dead_code)]
+
 use super::tabs::TabId;
 
 /// Direction of an arrow keypress.

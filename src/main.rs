@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
     let tui_silent = false;
 
     #[cfg(feature = "tui")]
-    let log_buffer = init_tracing(cli.verbose, tui_silent);
+    let _log_buffer = init_tracing(cli.verbose, tui_silent);
     #[cfg(not(feature = "tui"))]
     init_tracing(cli.verbose, tui_silent);
 

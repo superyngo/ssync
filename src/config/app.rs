@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn bom_is_stripped_on_load() {
-        let with_bom = format!("\u{feff}[settings]\ndefault_timeout = 7\n");
+        let with_bom = "\u{feff}[settings]\ndefault_timeout = 7\n".to_string();
         let f = write_tmp(&with_bom);
         let cfg = load(Some(f.path())).unwrap().unwrap();
         assert_eq!(cfg.settings.default_timeout, 7);

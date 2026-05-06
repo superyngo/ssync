@@ -9,6 +9,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event};
 
 /// Discard all pending crossterm events except `Resize` (§7.8 step 2).
+#[allow(dead_code)]
 pub fn drain_non_resize() -> Result<()> {
     while event::poll(Duration::ZERO)? {
         match event::read()? {

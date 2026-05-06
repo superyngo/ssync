@@ -130,7 +130,7 @@ pub struct App {
     sync_adhoc_files: Vec<String>,
     sync_adhoc_input: InputField,
     /// Source host override for sync (NOT persisted per AD-12).
-    sync_source_input: InputField,
+    _sync_source_input: InputField,
     /// Which param panel field is focused (when operate_focus == ParamPanel).
     param_field: ParamPanelField,
     /// Currently-running operation, if any. Mutually exclusive with starting
@@ -228,7 +228,7 @@ impl App {
             sync_dry_run: persisted.operate.sync_dry_run,
             sync_adhoc_files: Vec::new(),
             sync_adhoc_input: InputField::new(""),
-            sync_source_input: InputField::new(""),
+            _sync_source_input: InputField::new(""),
             param_field: ParamPanelField::CommandOrScript,
             running_op: None,
             event_tx,
@@ -1031,7 +1031,8 @@ impl App {
         if self.active_tab == TabId::Config && self.config_tab.is_editing_active() {
             let handled = self.config_tab.handle_key(key, &mut self.config);
             if let Some((kind, index)) = self.config_tab.pending_delete.take() {
-                self.config_tab.execute_delete(&mut self.config, kind, index);
+                self.config_tab
+                    .execute_delete(&mut self.config, kind, index);
             }
             return Ok(handled);
         }
@@ -1092,7 +1093,10 @@ impl App {
                 self.log_overlay_open = !self.log_overlay_open;
                 if self.log_overlay_open {
                     self.log_overlay_vp = Viewport::new();
-                    let len = self.log_buffer.as_ref().map_or(0, |b: &LogBufferHandle| b.len());
+                    let len = self
+                        .log_buffer
+                        .as_ref()
+                        .map_or(0, |b: &LogBufferHandle| b.len());
                     self.log_overlay_vp.set_dims(len, 0);
                 }
                 Ok(true)
@@ -1450,8 +1454,7 @@ impl App {
             }
             // Up at top of Checkout list escapes to NavBar.
             KeyCode::Up | KeyCode::Char('k')
-                if self.active_tab == TabId::Checkout
-                    && self.checkout_viewport.selected == 0 =>
+                if self.active_tab == TabId::Checkout && self.checkout_viewport.selected == 0 =>
             {
                 self.navbar_focused = true;
                 Ok(true)

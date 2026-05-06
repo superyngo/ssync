@@ -18,7 +18,7 @@ const LOG_BUFFER_CAP: usize = 500;
 /// A single captured tracing event, displayed in the log overlay.
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub when: SystemTime,
+    pub _when: SystemTime,
     pub level: String,
     pub target: String,
     pub text: String,
@@ -60,6 +60,7 @@ impl LogBufferHandle {
         self.inner.lock().unwrap().len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.lock().unwrap().is_empty()
     }
@@ -93,7 +94,7 @@ where
         event.record(&mut visitor);
 
         self.handle.push(LogEntry {
-            when: SystemTime::now(),
+            _when: SystemTime::now(),
             level: level.to_string(),
             target: event.metadata().target().to_string(),
             text: visitor.0,
