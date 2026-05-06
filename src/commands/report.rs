@@ -77,16 +77,13 @@ pub struct CheckReport {
 }
 
 /// Top-level typed result enum returned by `*_core` functions.
-///
-/// MVP scope (per AD-14): only `Check` is implemented. `Run`, `Exec`,
-/// `Sync`, and `Checkout` variants land alongside their `*_core` extraction
-/// in Phases 4–6.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "command", rename_all = "lowercase")]
 pub enum CommandReport {
     Check(CheckReport),
     Run(RunReport),
     Exec(ExecReport),
+    Sync(SyncReport),
 }
 
 // ── Run ──────────────────────────────────────────────────────────────────────
@@ -133,4 +130,31 @@ pub struct ExecReport {
     pub script: String,
     pub targets: Vec<String>,
     pub hosts: Vec<ExecHostResult>,
+}
+
+// ── Sync ─────────────────────────────────────────────────────────────────────
+
+/// Per-host aggregated result of a `sync_core` invocation.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncHostResult {
+    pub host: String,
+    pub status: HostStatus,
+    pub duration_ms: Option<u64>,
+    pub detail: String,
+    pub files_synced: usize,
+    pub files_skipped: usize,
+    pub errors: Vec<String>,
+}
+
+/// Typed return value of `sync_core`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncReport {
+    pub executed_at: String,
+    /// "config_entries" | "adhoc"
+    pub mode: String,
+    pub dry_run: bool,
+    pub total_files_synced: usize,
+    pub total_files_skipped: usize,
+    pub targets: Vec<String>,
+    pub hosts: Vec<SyncHostResult>,
 }

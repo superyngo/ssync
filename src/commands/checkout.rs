@@ -6,6 +6,7 @@ use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSumma
 
 /// Snapshot row from the database.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) struct HostSnapshot {
     pub(crate) host: String,
     pub(crate) collected_at: i64,

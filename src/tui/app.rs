@@ -40,7 +40,8 @@ use super::components::popup::centered_rect;
 use super::components::target_filter::{FilterPopup, FilterPopupResult};
 use super::components::viewport::Viewport;
 use super::state::persist::{
-    self, ActiveTab, OperationKind, TargetFilterMode, TargetFilterState, TuiPersistedState,
+    self, ActiveTab, OperationKind, SyncMode, TargetFilterMode, TargetFilterState,
+    TuiPersistedState,
 };
 use super::tabs::config_tab::ConfigTabState;
 use super::tabs::TabId;
@@ -66,6 +67,9 @@ enum ParamPanelField {
     CommandOrScript,
     Sudo,
     SecondFlag, // `yes` for Run, `keep` for Exec
+    SyncModeToggle,
+    SyncAdHocInput,
+    SyncDryRun,
 }
 
 pub struct App {
@@ -77,6 +81,8 @@ pub struct App {
     pub info_open: bool,
     pub checkout_viewport: Viewport,
     pub checkout_snapshots: Vec<HostSnapshot>,
+    /// Unfiltered cache for Checkout; `checkout_snapshots` is the filtered view.
+    checkout_all_snapshots: Vec<HostSnapshot>,
     pub checkout_columns: DisplayColumns,
     pub config: AppConfig,
     pub config_path: Option<PathBuf>,
@@ -99,6 +105,13 @@ pub struct App {
     run_yes: bool,
     exec_sudo: bool,
     exec_keep: bool,
+    /// Sync params (sync_mode and sync_dry_run persisted; adhoc_files NOT persisted per AD-12).
+    sync_mode: SyncMode,
+    sync_dry_run: bool,
+    sync_adhoc_files: Vec<String>,
+    sync_adhoc_input: InputField,
+    /// Source host override for sync (NOT persisted per AD-12).
+    sync_source_input: InputField,
     /// Which param panel field is focused (when operate_focus == ParamPanel).
     param_field: ParamPanelField,
     /// Currently-running operation, if any. Mutually exclusive with starting
@@ -159,7 +172,8 @@ impl App {
             should_quit: false,
             info_open: false,
             checkout_viewport: viewport,
-            checkout_snapshots: snapshots,
+            checkout_snapshots: snapshots.clone(),
+            checkout_all_snapshots: snapshots,
             checkout_columns: columns,
             config: ctx.config.clone(),
             config_path: ctx.config_path.clone(),
@@ -176,6 +190,11 @@ impl App {
             run_yes: persisted.operate.run_yes,
             exec_sudo: persisted.operate.exec_sudo,
             exec_keep: persisted.operate.exec_keep,
+            sync_mode: persisted.operate.sync_mode,
+            sync_dry_run: persisted.operate.sync_dry_run,
+            sync_adhoc_files: Vec::new(),
+            sync_adhoc_input: InputField::new(""),
+            sync_source_input: InputField::new(""),
             param_field: ParamPanelField::CommandOrScript,
             running_op: None,
             event_tx,
@@ -199,6 +218,8 @@ impl App {
                 run_yes: self.run_yes,
                 exec_sudo: self.exec_sudo,
                 exec_keep: self.exec_keep,
+                sync_mode: self.sync_mode,
+                sync_dry_run: self.sync_dry_run,
             },
         };
         if let Err(e) = persist::save(&self.state_file_path, &state) {
@@ -580,8 +601,88 @@ impl App {
         true
     }
 
-    /// Reload Checkout snapshots if the DB is marked stale. Called immediately
-    /// before rendering the Checkout tab (§18.3 lazy reopen).
+    /// Execute a `sync` operation in a background thread, following the same
+    /// pattern as `execute_check`/`execute_run`/`execute_exec`.
+    fn execute_sync(&mut self) -> bool {
+        if self.running_op.is_some() {
+            self.error = Some("An operation is already running.".to_string());
+            return true;
+        }
+        let target_mode = build_target_mode(&self.target_filter, &self.config);
+        let targets: Vec<String> = match resolve_target_names(&target_mode, &self.config) {
+            Ok(t) if !t.is_empty() => t,
+            Ok(_) => {
+                self.error = Some("No hosts matched the current filter.".to_string());
+                return true;
+            }
+            Err(e) => {
+                self.error = Some(format!("Filter error: {e}"));
+                return true;
+            }
+        };
+        let serial = self.target_filter.serial;
+        let timeout = self.last_timeout_secs;
+        let cfg = self.config.clone();
+        let cfg_path = self.config_path.clone();
+        let event_tx = self.event_tx.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let dry_run = self.sync_dry_run;
+        let adhoc_files = match self.sync_mode {
+            SyncMode::AdHoc => self.sync_adhoc_files.clone(),
+            SyncMode::ConfigEntries => Vec::new(),
+        };
+
+        let _ = std::thread::Builder::new()
+            .name("ssync-op".to_string())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let ctx = match Context::from_tui_parts(
+                        cfg, cfg_path, target_mode, serial, timeout, false,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                            return;
+                        }
+                    };
+                    let sink = EventSender::new(event_tx.clone());
+                    let outcome = tokio::select! {
+                        res = crate::commands::sync::sync_core(&ctx, &adhoc_files, dry_run, None, Some(&sink)) => res,
+                        _ = cancel_for_task.cancelled() => {
+                            let _ = event_tx.send(TuiEvent::OperationCancelled);
+                            return;
+                        }
+                    };
+                    match outcome {
+                        Ok(report) => {
+                            let _ = event_tx.send(TuiEvent::OperationFinished(report));
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                        }
+                    }
+                });
+            });
+
+        self.running_op = Some(RunningOp {
+            cancel,
+            started_at: std::time::Instant::now(),
+            targets,
+            host_outcomes: Vec::new(),
+        });
+        true
+    }
     fn maybe_reload_checkout(&mut self) {
         if !self.db_stale {
             return;
@@ -601,7 +702,8 @@ impl App {
                     verbose: false,
                 };
                 if let Ok(snaps) = fetch_latest_snapshots(&tmp_ctx, &host_names) {
-                    self.checkout_snapshots = snaps;
+                    self.checkout_all_snapshots = snaps;
+                    self.apply_checkout_filter();
                 }
                 self.db_stale = false;
             }
@@ -610,6 +712,30 @@ impl App {
                 // Leave db_stale true so the next OperationFinished retries.
             }
         }
+    }
+
+    /// Filter `checkout_all_snapshots` by the current `target_filter` host/group
+    /// selection and write the result into `checkout_snapshots`.
+    fn apply_checkout_filter(&mut self) {
+        let target_mode = build_target_mode(&self.target_filter, &self.config);
+        let visible: std::collections::HashSet<String> =
+            resolve_target_names(&target_mode, &self.config)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+        if visible.is_empty() {
+            // No filter active (or filter matches nothing): show all.
+            self.checkout_snapshots = self.checkout_all_snapshots.clone();
+        } else {
+            self.checkout_snapshots = self
+                .checkout_all_snapshots
+                .iter()
+                .filter(|s| visible.contains(&s.host))
+                .cloned()
+                .collect();
+        }
+        self.checkout_viewport
+            .set_dims(self.checkout_snapshots.len(), 0);
     }
 
     /// Returns true if the event mutated state (frame should redraw).
@@ -630,15 +756,46 @@ impl App {
 
         // §14.3: while an input field is active, suspend ALL other routing.
         if self.active_tab == TabId::Operate {
-            let active_field = match self.operate_operation {
-                OperationKind::Run => Some(&mut self.run_command),
-                OperationKind::Exec => Some(&mut self.exec_script),
-                _ => None,
-            };
+            let active_field: Option<&mut InputField> =
+                match (self.operate_operation, self.operate_focus, self.param_field) {
+                    (OperationKind::Run, OperateFocus::ParamPanel, _) => {
+                        if self.run_command.mode == InputMode::Active {
+                            Some(&mut self.run_command)
+                        } else {
+                            None
+                        }
+                    }
+                    (OperationKind::Exec, OperateFocus::ParamPanel, _) => {
+                        if self.exec_script.mode == InputMode::Active {
+                            Some(&mut self.exec_script)
+                        } else {
+                            None
+                        }
+                    }
+                    (
+                        OperationKind::Sync,
+                        OperateFocus::ParamPanel,
+                        ParamPanelField::SyncAdHocInput,
+                    ) => {
+                        if self.sync_adhoc_input.mode == InputMode::Active {
+                            Some(&mut self.sync_adhoc_input)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
             if let Some(field) = active_field {
-                if field.mode == InputMode::Active {
-                    return Ok(field.handle_key(key));
+                let changed = field.handle_key(key);
+                // If sync adhoc input just committed (Enter → mode Normal), add path to list.
+                if self.operate_operation == OperationKind::Sync
+                    && self.sync_adhoc_input.mode == InputMode::Normal
+                    && !self.sync_adhoc_input.value.is_empty()
+                {
+                    let path = std::mem::take(&mut self.sync_adhoc_input.value);
+                    self.sync_adhoc_files.push(path);
                 }
+                return Ok(changed);
             }
         }
 
@@ -655,6 +812,8 @@ impl App {
                     self.target_filter = popup.state;
                     persist::validate_filter(&mut self.target_filter, &self.config);
                     self.save_state();
+                    // Re-filter checkout snapshots from the unfiltered cache.
+                    self.apply_checkout_filter();
                     return Ok(true);
                 }
             }
@@ -793,29 +952,41 @@ impl App {
                 self.operate_focus = match self.operate_focus {
                     OperateFocus::Execute => OperateFocus::TargetRow,
                     OperateFocus::TargetRow => {
-                        if self.operate_operation == OperationKind::Check
-                            || self.operate_operation == OperationKind::Sync
-                        {
+                        if self.operate_operation == OperationKind::Check {
                             OperateFocus::OpRadio
                         } else {
+                            self.param_field = match self.operate_operation {
+                                OperationKind::Sync => ParamPanelField::SyncDryRun,
+                                _ => ParamPanelField::SecondFlag,
+                            };
                             OperateFocus::ParamPanel
                         }
                     }
-                    OperateFocus::ParamPanel => {
-                        // Move up inside param panel or leave it.
-                        match self.param_field {
+                    OperateFocus::ParamPanel => match self.operate_operation {
+                        OperationKind::Sync => match self.param_field {
+                            ParamPanelField::SyncDryRun => {
+                                self.param_field = ParamPanelField::SyncAdHocInput;
+                                OperateFocus::ParamPanel
+                            }
+                            ParamPanelField::SyncAdHocInput => {
+                                self.param_field = ParamPanelField::SyncModeToggle;
+                                OperateFocus::ParamPanel
+                            }
+                            _ => OperateFocus::OpRadio,
+                        },
+                        _ => match self.param_field {
                             ParamPanelField::SecondFlag => {
                                 self.param_field = ParamPanelField::Sudo;
+                                OperateFocus::ParamPanel
                             }
                             ParamPanelField::Sudo => {
                                 self.param_field = ParamPanelField::CommandOrScript;
+                                OperateFocus::ParamPanel
                             }
-                            ParamPanelField::CommandOrScript => {
-                                return Ok(true); // at top of panel, stay
-                            }
-                        }
-                        OperateFocus::ParamPanel
-                    }
+                            ParamPanelField::CommandOrScript => OperateFocus::OpRadio,
+                            _ => OperateFocus::ParamPanel,
+                        },
+                    },
                     OperateFocus::OpRadio => OperateFocus::OpRadio,
                 };
                 Ok(true)
@@ -823,29 +994,41 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Operate => {
                 self.operate_focus = match self.operate_focus {
                     OperateFocus::OpRadio => {
-                        if self.operate_operation == OperationKind::Check
-                            || self.operate_operation == OperationKind::Sync
-                        {
+                        if self.operate_operation == OperationKind::Check {
                             OperateFocus::TargetRow
                         } else {
-                            self.param_field = ParamPanelField::CommandOrScript;
+                            self.param_field = match self.operate_operation {
+                                OperationKind::Sync => ParamPanelField::SyncModeToggle,
+                                _ => ParamPanelField::CommandOrScript,
+                            };
                             OperateFocus::ParamPanel
                         }
                     }
-                    OperateFocus::ParamPanel => {
-                        match self.param_field {
+                    OperateFocus::ParamPanel => match self.operate_operation {
+                        OperationKind::Sync => match self.param_field {
+                            ParamPanelField::SyncModeToggle => {
+                                self.param_field = ParamPanelField::SyncAdHocInput;
+                                OperateFocus::ParamPanel
+                            }
+                            ParamPanelField::SyncAdHocInput => {
+                                self.param_field = ParamPanelField::SyncDryRun;
+                                OperateFocus::ParamPanel
+                            }
+                            _ => OperateFocus::TargetRow,
+                        },
+                        _ => match self.param_field {
                             ParamPanelField::CommandOrScript => {
                                 self.param_field = ParamPanelField::Sudo;
+                                OperateFocus::ParamPanel
                             }
                             ParamPanelField::Sudo => {
                                 self.param_field = ParamPanelField::SecondFlag;
+                                OperateFocus::ParamPanel
                             }
-                            ParamPanelField::SecondFlag => {
-                                return Ok(true); // at bottom, delegate to next zone
-                            }
-                        }
-                        OperateFocus::ParamPanel
-                    }
+                            ParamPanelField::SecondFlag => OperateFocus::TargetRow,
+                            _ => OperateFocus::TargetRow,
+                        },
+                    },
                     OperateFocus::TargetRow => OperateFocus::Execute,
                     OperateFocus::Execute => OperateFocus::Execute,
                 };
@@ -913,8 +1096,39 @@ impl App {
                         self.exec_keep = !self.exec_keep;
                         self.save_state();
                     }
+                    (OperationKind::Sync, ParamPanelField::SyncModeToggle) => {
+                        self.sync_mode = match self.sync_mode {
+                            SyncMode::ConfigEntries => SyncMode::AdHoc,
+                            SyncMode::AdHoc => SyncMode::ConfigEntries,
+                        };
+                        self.save_state();
+                    }
+                    (OperationKind::Sync, ParamPanelField::SyncDryRun) => {
+                        self.sync_dry_run = !self.sync_dry_run;
+                        self.save_state();
+                    }
                     _ => {}
                 }
+                Ok(true)
+            }
+            // Enter on sync ad-hoc input activates it.
+            KeyCode::Enter
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::ParamPanel
+                    && self.operate_operation == OperationKind::Sync
+                    && self.param_field == ParamPanelField::SyncAdHocInput =>
+            {
+                self.sync_adhoc_input.activate();
+                Ok(true)
+            }
+            // Delete removes the last item from the sync adhoc file list.
+            KeyCode::Delete
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::ParamPanel
+                    && self.operate_operation == OperationKind::Sync
+                    && self.param_field == ParamPanelField::SyncAdHocInput =>
+            {
+                self.sync_adhoc_files.pop();
                 Ok(true)
             }
             KeyCode::Enter
@@ -925,11 +1139,7 @@ impl App {
                     OperationKind::Check => self.execute_check(),
                     OperationKind::Run => self.execute_run(),
                     OperationKind::Exec => self.execute_exec(),
-                    OperationKind::Sync => {
-                        self.error =
-                            Some("Sync not yet wired in TUI (coming in Phase 6).".to_string());
-                        true
-                    }
+                    OperationKind::Sync => self.execute_sync(),
                 })
             }
             KeyCode::Char('f') if self.active_tab == TabId::Operate => {
@@ -939,6 +1149,11 @@ impl App {
             }
 
             // ── Checkout tab ───────────────────────────────────────────────
+            KeyCode::Char('f') if self.active_tab == TabId::Checkout => {
+                let popup = FilterPopup::new(self.target_filter.clone(), false, &self.config);
+                self.filter_popup = Some(popup);
+                Ok(true)
+            }
             KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Checkout => {
                 self.checkout_viewport.move_up();
                 Ok(true)
@@ -1134,9 +1349,16 @@ impl App {
 
         let has_params = matches!(
             self.operate_operation,
-            OperationKind::Run | OperationKind::Exec
+            OperationKind::Run | OperationKind::Exec | OperationKind::Sync
         );
-        let param_rows = if has_params { 7u16 } else { 0u16 };
+        let param_rows = match self.operate_operation {
+            OperationKind::Run | OperationKind::Exec => 7u16,
+            OperationKind::Sync => {
+                let adhoc_list_rows = self.sync_adhoc_files.len().min(5) as u16;
+                8 + adhoc_list_rows
+            }
+            _ => 0u16,
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1265,6 +1487,116 @@ impl App {
             let _ = Color::DarkGray; // used below
         }
 
+        // Sync param panel.
+        if self.operate_operation == OperationKind::Sync && has_params {
+            let param_focused = self.operate_focus == OperateFocus::ParamPanel;
+            let param_area = chunks[1];
+
+            // Mode toggle row.
+            let mode_focused = param_focused && self.param_field == ParamPanelField::SyncModeToggle;
+            let mode_label = match self.sync_mode {
+                SyncMode::ConfigEntries => "◉ Config entries  ○ Ad-hoc files",
+                SyncMode::AdHoc => "○ Config entries  ◉ Ad-hoc files",
+            };
+            let mode_style = if mode_focused {
+                Style::default()
+                    .fg(self.theme.accent_operate)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+
+            // Ad-hoc input row.
+            let adhoc_input_focused =
+                param_focused && self.param_field == ParamPanelField::SyncAdHocInput;
+            let dry_run_focused = param_focused && self.param_field == ParamPanelField::SyncDryRun;
+
+            let adhoc_list_rows = self.sync_adhoc_files.len().min(5) as u16;
+            let sync_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),                      // mode toggle
+                    Constraint::Length(1),                      // blank
+                    Constraint::Length(3),                      // adhoc input (or info line)
+                    Constraint::Length(adhoc_list_rows.max(1)), // adhoc list
+                    Constraint::Length(1),                      // dry-run toggle
+                    Constraint::Min(0),
+                ])
+                .split(param_area);
+
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw("  Mode: "),
+                    Span::styled(mode_label, mode_style),
+                    Span::styled(
+                        "  (Space to toggle)",
+                        Style::default().fg(self.theme.inactive),
+                    ),
+                ])),
+                sync_chunks[0],
+            );
+
+            // Ad-hoc input (shown even in ConfigEntries mode as grayed-out hint).
+            if self.sync_mode == SyncMode::AdHoc {
+                self.sync_adhoc_input.render(
+                    frame,
+                    sync_chunks[2],
+                    "Add path (Enter=add, Del=remove last)",
+                    adhoc_input_focused,
+                );
+                // File list.
+                let list_lines: Vec<Line> = if self.sync_adhoc_files.is_empty() {
+                    vec![Line::from(Span::styled(
+                        "  (no paths — type above and press Enter)",
+                        Style::default().fg(self.theme.inactive),
+                    ))]
+                } else {
+                    self.sync_adhoc_files
+                        .iter()
+                        .rev()
+                        .take(5)
+                        .map(|p| Line::from(format!("  · {p}")))
+                        .collect()
+                };
+                frame.render_widget(Paragraph::new(list_lines), sync_chunks[3]);
+            } else {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  (using [[sync]] config entries)",
+                        Style::default().fg(self.theme.inactive),
+                    )),
+                    sync_chunks[2],
+                );
+            }
+
+            // Dry-run toggle.
+            let dry_style = if dry_run_focused {
+                Style::default()
+                    .fg(self.theme.accent_operate)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        if self.sync_dry_run {
+                            "[✓] dry-run"
+                        } else {
+                            "[ ] dry-run"
+                        },
+                        dry_style,
+                    ),
+                    Span::styled(
+                        "  (Space to toggle)",
+                        Style::default().fg(self.theme.inactive),
+                    ),
+                ])),
+                sync_chunks[4],
+            );
+        }
+
         // Target row.
         let target_focused = self.operate_focus == OperateFocus::TargetRow;
         let mode_summary = match self.target_filter.mode {
@@ -1293,7 +1625,7 @@ impl App {
         });
         frame.render_widget(target_p, chunks[2]);
 
-        // Applicable entries panel — read-only summary for check.
+        // Applicable entries panel — read-only summary for check/sync.
         if self.operate_operation == OperationKind::Check {
             let mut lines: Vec<Line> = Vec::new();
             lines.push(Line::from(Span::styled(
@@ -1331,6 +1663,49 @@ impl App {
                     lines.push(Line::from(format!(
                         "  ... ({} more not shown)",
                         self.config.check.len() - 6
+                    )));
+                }
+            }
+            let panel = Paragraph::new(lines).wrap(Wrap { trim: false });
+            frame.render_widget(panel, chunks[3]);
+        } else if self.operate_operation == OperationKind::Sync
+            && self.sync_mode == SyncMode::ConfigEntries
+        {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(Span::styled(
+                "─ Applicable [[sync]] entries ─",
+                Style::default().fg(self.theme.inactive),
+            )));
+            if self.config.sync.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (no [[sync]] entries — add one to config.toml)",
+                    Style::default().fg(self.theme.inactive),
+                )));
+            } else {
+                for entry in self.config.sync.iter().take(6) {
+                    let paths = entry
+                        .paths
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let groups = if entry.groups.is_empty() {
+                        "unscoped".to_string()
+                    } else {
+                        format!("groups:[{}]", entry.groups.join(","))
+                    };
+                    let src = entry
+                        .source
+                        .as_deref()
+                        .map(|s| format!("  src:{s}"))
+                        .unwrap_or_default();
+                    lines.push(Line::from(format!("  ▸ {}  {}{}", paths, groups, src)));
+                }
+                if self.config.sync.len() > 6 {
+                    lines.push(Line::from(format!(
+                        "  ... ({} more not shown)",
+                        self.config.sync.len() - 6
                     )));
                 }
             }
@@ -1444,6 +1819,14 @@ impl App {
                 r.executed_at.as_str(),
                 format!("  script: {}", truncate(&r.script, 50)),
             ),
+            CommandReport::Sync(r) => (
+                r.hosts.len(),
+                r.executed_at.as_str(),
+                format!(
+                    "  mode:{} dry-run:{} total_synced:{}",
+                    r.mode, r.dry_run, r.total_files_synced
+                ),
+            ),
         };
 
         let title = format!(" Results — {host_count} hosts  (Enter / Esc to dismiss) ");
@@ -1546,6 +1929,35 @@ impl App {
                         if !first.is_empty() {
                             lines.push(Line::from(format!("     ↳ {}", truncate(first, 70))));
                         }
+                    }
+                }
+            }
+            CommandReport::Sync(r) => {
+                let ok = r
+                    .hosts
+                    .iter()
+                    .filter(|h| matches!(h.status, HostStatus::Online))
+                    .count();
+                let fail = r
+                    .hosts
+                    .iter()
+                    .filter(|h| !matches!(h.status, HostStatus::Online))
+                    .count();
+                lines.push(Line::from(format!(
+                    "Summary: {ok} ok / {fail} fail    synced:{} skipped:{}    Executed: {executed_at}",
+                    r.total_files_synced, r.total_files_skipped
+                )));
+                lines.push(Line::from(header_detail));
+                lines.push(Line::from(""));
+                for h in &r.hosts {
+                    let detail = if h.files_synced > 0 || h.files_skipped > 0 {
+                        format!("{} synced, {} skipped", h.files_synced, h.files_skipped)
+                    } else {
+                        h.detail.clone()
+                    };
+                    lines.push(render_row(&h.host, h.status, &detail, h.duration_ms));
+                    for err in h.errors.iter().take(2) {
+                        lines.push(Line::from(format!("     ↳ {}", truncate(err, 70))));
                     }
                 }
             }
@@ -1699,24 +2111,31 @@ Global keys
   ?           Toggle this help
 
 Operate tab
-  ↑↓ / j k   Move between zones (OpRadio → ParamPanel → Target → Execute)
-  ← →         (on Operation row) cycle check / run / exec / sync
+  ↑↓ / j k   Navigate zones: OpRadio → ParamPanel → TargetRow → Execute
+  ← →         (OpRadio) cycle check / run / exec / sync
   f           Open Target Filter popup
-  Enter       (on ParamPanel text field) activate input
-  Enter       (on Execute button) run the selected operation
-  Space       (on checkbox field) toggle sudo / yes / keep
-  Esc         Dismiss results or cancel running operation
+  Enter       (ParamPanel text field) activate input; (Execute) run operation
+  Space       (checkbox) toggle sudo / yes / keep / dry-run / sync-mode
+  Del         (SyncAdHocInput focused) remove last ad-hoc path
+  Esc         Dismiss results popup / cancel running operation
   (while typing) Enter to confirm, Esc to revert
+
+Sync operation (ParamPanel)
+  Space on Mode toggle   Switch between Config-entries ↔ Ad-hoc
+  Enter on Ad-hoc input  Add typed path to the list
+  Del on Ad-hoc input    Remove last path from the list
+  Space on Dry-run       Toggle dry-run flag
 
 Checkout tab
   ↑↓ / j k    Move row selection
   PgUp/PgDn   Page navigation
   Home/End    Jump to top / bottom
+  f           Open Filter popup (filter by group / host)
 
 Filter popup
   ↑↓ / Tab    Move between fields
   Space/Enter Toggle / select
-  Enter on [Apply]   Commit + persist
+  Enter on [Apply]   Commit + persist filter
   Esc                Cancel
 
 Config tab

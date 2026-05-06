@@ -129,6 +129,18 @@ pub struct OperateState {
     pub exec_sudo: bool,
     /// Keep uploaded script on remote after execution.
     pub exec_keep: bool,
+    /// Sync tab: config_entries | adhoc
+    pub sync_mode: SyncMode,
+    /// Sync tab: whether to do a dry run (no files transferred).
+    pub sync_dry_run: bool,
+}
+
+/// Sync params panel mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncMode {
+    #[default]
+    ConfigEntries,
+    AdHoc,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
