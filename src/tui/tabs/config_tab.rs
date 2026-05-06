@@ -440,7 +440,7 @@ impl ConfigTabState {
     /// Used by app.rs to suspend global hotkeys.
     pub fn is_editing_active(&self) -> bool {
         if let Some(ref input) = self.editing_field {
-            if input.mode == crate::tui::components::input_field::InputMode::Active {
+            if input.mode == InputMode::Active {
                 return true;
             }
         }
@@ -449,7 +449,7 @@ impl ConfigTabState {
                 return true;
             }
             if let Some(ref ve) = form.vec_editor {
-                if ve.input.mode == crate::tui::components::input_field::InputMode::Active {
+                if ve.input_active {
                     return true;
                 }
             }
