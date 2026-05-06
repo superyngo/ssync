@@ -46,6 +46,7 @@ use super::state::persist::{
 };
 use super::tabs::config_tab::trunc;
 use super::tabs::config_tab::ConfigTabState;
+use super::tabs::config_tab::ConfigZone;
 use super::tabs::operate_tab::{self, OperateFocus, OperateRenderData, ParamPanelField};
 use super::tabs::TabId;
 use super::theme::Theme;
@@ -91,6 +92,7 @@ impl AuthPopup {
 
 pub struct App {
     pub active_tab: TabId,
+    pub navbar_focused: bool,
     pub theme: Theme,
     pub error: Option<String>,
     pub help_open: bool,
@@ -197,6 +199,7 @@ impl App {
 
         Self {
             active_tab,
+            navbar_focused: false,
             theme: Theme::default_palette(),
             error: None,
             help_open: false,
@@ -1033,6 +1036,44 @@ impl App {
             return Ok(handled);
         }
 
+        // NavBar focus: intercept keys when tab bar has focus.
+        if self.navbar_focused {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.active_tab = self.active_tab.prev();
+                    return Ok(true);
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    self.active_tab = self.active_tab.next();
+                    return Ok(true);
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => {
+                    self.navbar_focused = false;
+                    return Ok(true);
+                }
+                KeyCode::Esc => {
+                    self.navbar_focused = false;
+                    return Ok(true);
+                }
+                KeyCode::Char('1') => {
+                    self.active_tab = TabId::Config;
+                    self.navbar_focused = false;
+                    return Ok(true);
+                }
+                KeyCode::Char('2') => {
+                    self.active_tab = TabId::Operate;
+                    self.navbar_focused = false;
+                    return Ok(true);
+                }
+                KeyCode::Char('3') => {
+                    self.active_tab = TabId::Checkout;
+                    self.navbar_focused = false;
+                    return Ok(true);
+                }
+                _ => return Ok(false),
+            }
+        }
+
         match key.code {
             // ── Global keys (always first; work from any tab) ──────────────
             KeyCode::Char('q') => {
@@ -1143,6 +1184,15 @@ impl App {
                 self.config_tab.request_delete();
                 Ok(true)
             }
+            // Up at top of Config Sidebar escapes to NavBar.
+            KeyCode::Up | KeyCode::Char('k')
+                if self.active_tab == TabId::Config
+                    && self.config_tab.zone == ConfigZone::Sidebar
+                    && self.config_tab.sidebar_vp.selected == 0 =>
+            {
+                self.navbar_focused = true;
+                Ok(true)
+            }
             // All other Config tab keys routed to ConfigTabState (including 'e'/Enter for inline edit).
             _ if self.active_tab == TabId::Config => {
                 let handled = self.config_tab.handle_key(key, &mut self.config);
@@ -1211,7 +1261,10 @@ impl App {
                             _ => OperateFocus::ParamPanel,
                         },
                     },
-                    OperateFocus::OpRadio => OperateFocus::OpRadio,
+                    OperateFocus::OpRadio => {
+                        self.navbar_focused = true;
+                        OperateFocus::OpRadio
+                    }
                 };
                 Ok(true)
             }
@@ -1395,6 +1448,14 @@ impl App {
                 self.filter_popup = Some(popup);
                 Ok(true)
             }
+            // Up at top of Checkout list escapes to NavBar.
+            KeyCode::Up | KeyCode::Char('k')
+                if self.active_tab == TabId::Checkout
+                    && self.checkout_viewport.selected == 0 =>
+            {
+                self.navbar_focused = true;
+                Ok(true)
+            }
             KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Checkout => {
                 self.checkout_viewport.move_up();
                 Ok(true)
@@ -1492,15 +1553,20 @@ impl App {
             TabId::Operate => self.theme.accent_operate,
             TabId::Checkout => self.theme.accent_checkout,
         };
+        let highlight = if self.navbar_focused {
+            Style::default()
+                .fg(accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED | Modifier::UNDERLINED)
+        } else {
+            Style::default()
+                .fg(accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        };
         let tabs = Tabs::new(titles)
             .block(Block::default().borders(Borders::ALL).title(" ssync "))
             .select(selected)
             .style(Style::default().fg(self.theme.inactive))
-            .highlight_style(
-                Style::default()
-                    .fg(accent)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            );
+            .highlight_style(highlight);
         frame.render_widget(tabs, area);
     }
 
