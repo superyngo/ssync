@@ -1023,6 +1023,16 @@ impl App {
             }
         }
 
+        // §edit-guard: while config tab has an active text input, suspend all
+        // global shortcuts and route directly to the config tab.
+        if self.active_tab == TabId::Config && self.config_tab.is_editing_active() {
+            let handled = self.config_tab.handle_key(key, &mut self.config);
+            if let Some((kind, index)) = self.config_tab.pending_delete.take() {
+                self.config_tab.execute_delete(&mut self.config, kind, index);
+            }
+            return Ok(handled);
+        }
+
         match key.code {
             // ── Global keys (always first; work from any tab) ──────────────
             KeyCode::Char('q') => {
@@ -1150,6 +1160,8 @@ impl App {
                     OperateFocus::Execute => {
                         // Only go to ApplicableEntries if there's an entries panel visible.
                         if self.has_entries_panel() {
+                            let count = self.entries_panel_count();
+                            self.entries_scroll = count.saturating_sub(6);
                             OperateFocus::ApplicableEntries
                         } else {
                             OperateFocus::TargetRow
