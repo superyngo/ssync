@@ -18,11 +18,7 @@ use cli::{Cli, Commands};
 fn binary_is_ssync_tui() -> bool {
     std::env::args_os()
         .next()
-        .and_then(|p| {
-            std::path::Path::new(&p)
-                .file_stem()
-                .map(|s| s.to_owned())
-        })
+        .and_then(|p| std::path::Path::new(&p).file_stem().map(|s| s.to_owned()))
         .map(|s| s == "ssync-tui")
         .unwrap_or(false)
 }

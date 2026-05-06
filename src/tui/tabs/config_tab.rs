@@ -54,8 +54,8 @@ impl ConfigTabState {
         let mut sidebar_vp = Viewport::new();
         sidebar_vp.set_dims(items.len(), 0);
 
-        let config_mtime = config_path
-            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        let config_mtime =
+            config_path.and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
 
         Self {
             zone: ConfigZone::Sidebar,
@@ -82,8 +82,8 @@ impl ConfigTabState {
             }
         }
         self.field_vp = Viewport::new();
-        self.config_mtime = config_path
-            .and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        self.config_mtime =
+            config_path.and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
     }
 
     /// Build the breadcrumb string for the current focus position.
@@ -295,42 +295,51 @@ impl ConfigTabState {
                 if config.host.is_empty() {
                     vec![]
                 } else {
-                    vec![("hosts".to_string(), format!("{} configured", config.host.len()))]
+                    vec![(
+                        "hosts".to_string(),
+                        format!("{} configured", config.host.len()),
+                    )]
                 }
             }
-            Some(SidebarItem::Host(i)) => {
-                config.host.get(*i).map(|h| host_fields(h)).unwrap_or_default()
-            }
+            Some(SidebarItem::Host(i)) => config
+                .host
+                .get(*i)
+                .map(|h| host_fields(h))
+                .unwrap_or_default(),
             Some(SidebarItem::SectionChecks) => {
                 if config.check.is_empty() {
                     vec![]
                 } else {
-                    vec![("checks".to_string(), format!("{} configured", config.check.len()))]
+                    vec![(
+                        "checks".to_string(),
+                        format!("{} configured", config.check.len()),
+                    )]
                 }
             }
-            Some(SidebarItem::Check(i)) => {
-                config.check.get(*i).map(|c| check_fields(c)).unwrap_or_default()
-            }
+            Some(SidebarItem::Check(i)) => config
+                .check
+                .get(*i)
+                .map(|c| check_fields(c))
+                .unwrap_or_default(),
             Some(SidebarItem::SectionSyncs) => {
                 if config.sync.is_empty() {
                     vec![]
                 } else {
-                    vec![("syncs".to_string(), format!("{} configured", config.sync.len()))]
+                    vec![(
+                        "syncs".to_string(),
+                        format!("{} configured", config.sync.len()),
+                    )]
                 }
             }
-            Some(SidebarItem::Sync(i)) => {
-                config.sync.get(*i).map(|s| sync_fields(s)).unwrap_or_default()
-            }
+            Some(SidebarItem::Sync(i)) => config
+                .sync
+                .get(*i)
+                .map(|s| sync_fields(s))
+                .unwrap_or_default(),
         }
     }
 
-    fn render_sidebar(
-        &mut self,
-        area: Rect,
-        frame: &mut Frame,
-        theme: &Theme,
-        config: &AppConfig,
-    ) {
+    fn render_sidebar(&mut self, area: Rect, frame: &mut Frame, theme: &Theme, config: &AppConfig) {
         let focused = self.zone == ConfigZone::Sidebar;
         let border_style = Style::default().fg(if focused {
             theme.accent_config
@@ -358,7 +367,13 @@ impl ConfigTabState {
                 let is_sel = abs == self.sidebar_vp.selected;
 
                 let (prefix, text, is_header) = sidebar_item_display(item, config);
-                let glyph = if is_sel && focused { "▶" } else if is_sel { ">" } else { " " };
+                let glyph = if is_sel && focused {
+                    "▶"
+                } else if is_sel {
+                    ">"
+                } else {
+                    " "
+                };
                 let label = trunc(&format!("{glyph}{prefix}{text}"), max_w);
 
                 let style = if is_sel && focused {
@@ -412,15 +427,11 @@ impl ConfigTabState {
                 Some(SidebarItem::SectionChecks) if config.check.is_empty() => {
                     "(no [[check]] entries configured)"
                 }
-                Some(SidebarItem::SectionChecks) => {
-                    "(select a check entry in the sidebar  ↑↓)"
-                }
+                Some(SidebarItem::SectionChecks) => "(select a check entry in the sidebar  ↑↓)",
                 Some(SidebarItem::SectionSyncs) if config.sync.is_empty() => {
                     "(no [[sync]] entries configured)"
                 }
-                Some(SidebarItem::SectionSyncs) => {
-                    "(select a sync entry in the sidebar  ↑↓)"
-                }
+                Some(SidebarItem::SectionSyncs) => "(select a sync entry in the sidebar  ↑↓)",
                 _ => "(nothing to show)",
             };
             frame.render_widget(
@@ -466,7 +477,11 @@ impl ConfigTabState {
 
         let table = Table::new(
             rows,
-            [Constraint::Length(key_w), Constraint::Length(3), Constraint::Min(0)],
+            [
+                Constraint::Length(key_w),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ],
         );
         frame.render_widget(table, inner);
     }
@@ -586,10 +601,7 @@ fn check_fields(c: &CheckEntry) -> Vec<(String, String)> {
         ("enable_all".into(), c.enable_all.to_string()),
     ];
     for (i, p) in c.path.iter().enumerate() {
-        f.push((
-            format!("path[{i}]"),
-            format!("{} → {}", p.label, p.path),
-        ));
+        f.push((format!("path[{i}]"), format!("{} → {}", p.label, p.path)));
     }
     f
 }

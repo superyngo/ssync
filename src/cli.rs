@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "SSH-config-based cross-platform remote management tool",
     subcommand_required = false,
-    arg_required_else_help = false,
+    arg_required_else_help = false
 )]
 pub struct Cli {
     /// Enable verbose output

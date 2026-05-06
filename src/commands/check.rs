@@ -260,7 +260,10 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
     }
 
     let sink = PrinterSink;
-    let CommandReport::Check(report) = check_core(ctx, Some(&sink)).await?;
+    let raw = check_core(ctx, Some(&sink)).await?;
+    let CommandReport::Check(report) = raw else {
+        unreachable!("check_core always returns CommandReport::Check")
+    };
 
     // Build legacy Summary + OperationReport from the typed CheckReport.
     let mut summary = Summary::default();
@@ -272,11 +275,11 @@ pub async fn run(ctx: &Context, output: &crate::cli::OutputArgs) -> Result<()> {
                 summary.add_failure(&h.host, &h.detail);
             }
             HostStatus::Unreachable => {
-                let err = h
-                    .detail
-                    .strip_prefix("unreachable — ")
-                    .unwrap_or(&h.detail);
+                let err = h.detail.strip_prefix("unreachable — ").unwrap_or(&h.detail);
                 summary.add_failure(&h.host, err);
+            }
+            HostStatus::Skipped => {
+                summary.add_skip();
             }
         }
         let status = match h.status {
@@ -363,6 +366,7 @@ impl ProgressSink for PrinterSink {
         let kind = match status {
             HostStatus::Online => "ok",
             HostStatus::Partial => "skip",
+            HostStatus::Skipped => "skip",
             _ => "error",
         };
         printer::print_host_line(host, kind, detail);

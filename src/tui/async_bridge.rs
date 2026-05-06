@@ -11,7 +11,7 @@
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::report::{CheckReport, HostStatus, ProgressSink};
+use crate::commands::report::{CommandReport, HostStatus, ProgressSink};
 
 /// Events flowing from a running operation back to the main loop.
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub enum TuiEvent {
         duration_ms: u64,
     },
     /// Operation finished cleanly — payload carries the final report.
-    OperationFinished(CheckReport),
+    OperationFinished(CommandReport),
     /// Operation cancelled by user (Esc on progress popup).
     OperationCancelled,
     /// Top-level error (target resolution, pool setup, etc).
@@ -120,10 +120,7 @@ mod tests {
 
     #[test]
     fn truncate_detail_three_lines_joined() {
-        assert_eq!(
-            truncate_detail("a\nb\nc", 3),
-            "a ↵ b ↵ c"
-        );
+        assert_eq!(truncate_detail("a\nb\nc", 3), "a ↵ b ↵ c");
     }
 
     #[test]

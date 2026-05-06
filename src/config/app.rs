@@ -92,9 +92,8 @@ pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
                     apply_config_to_doc(&mut doc, config);
                     let candidate = doc.to_string();
                     // Round-trip validate: catch apply_config_to_doc bugs before writing.
-                    toml::from_str::<AppConfig>(&candidate).context(
-                        "apply_config_to_doc produced invalid TOML; aborting write",
-                    )?;
+                    toml::from_str::<AppConfig>(&candidate)
+                        .context("apply_config_to_doc produced invalid TOML; aborting write")?;
                     candidate
                 }
                 Err(e) => {
@@ -107,7 +106,8 @@ pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let serialized = toml::to_string_pretty(config).context("Failed to serialize config")?;
+            let serialized =
+                toml::to_string_pretty(config).context("Failed to serialize config")?;
             inject_config_comments(&serialized)
         }
         Err(e) => return Err(e).context("Failed to read existing config"),
@@ -122,7 +122,9 @@ pub fn save(config: &AppConfig, custom_path: Option<&Path>) -> Result<()> {
     tmp.as_file_mut()
         .write_all(new_content.as_bytes())
         .context("Failed to write temp config file")?;
-    tmp.as_file_mut().flush().context("Failed to flush temp config file")?;
+    tmp.as_file_mut()
+        .flush()
+        .context("Failed to flush temp config file")?;
     tmp.persist(&path)
         .map_err(|e| e.error)
         .with_context(|| format!("Failed to persist {}", path.display()))?;
@@ -165,7 +167,11 @@ fn apply_config_to_doc(doc: &mut DocumentMut, config: &AppConfig) {
         .as_table_mut()
         .expect("settings must be a table");
 
-    set_scalar(settings, "default_timeout", config.settings.default_timeout as i64);
+    set_scalar(
+        settings,
+        "default_timeout",
+        config.settings.default_timeout as i64,
+    );
     set_scalar(
         settings,
         "data_retention_days",
@@ -179,8 +185,16 @@ fn apply_config_to_doc(doc: &mut DocumentMut, config: &AppConfig) {
             super::schema::ConflictStrategy::Skip => "skip",
         },
     );
-    set_scalar(settings, "propagate_deletes", config.settings.propagate_deletes);
-    set_scalar(settings, "max_concurrency", config.settings.max_concurrency as i64);
+    set_scalar(
+        settings,
+        "propagate_deletes",
+        config.settings.propagate_deletes,
+    );
+    set_scalar(
+        settings,
+        "max_concurrency",
+        config.settings.max_concurrency as i64,
+    );
     set_scalar(
         settings,
         "max_per_host_concurrency",

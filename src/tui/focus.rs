@@ -217,8 +217,14 @@ mod tests {
         let mut vp = Viewport::new();
         vp.set_dims(10, 5);
         let mut a = ListAdapter(&mut vp);
-        assert_eq!(a.handle_arrow(Direction::Left), ArrowResult::Escaped(Direction::Left));
-        assert_eq!(a.handle_arrow(Direction::Right), ArrowResult::Escaped(Direction::Right));
+        assert_eq!(
+            a.handle_arrow(Direction::Left),
+            ArrowResult::Escaped(Direction::Left)
+        );
+        assert_eq!(
+            a.handle_arrow(Direction::Right),
+            ArrowResult::Escaped(Direction::Right)
+        );
     }
 
     #[test]
@@ -227,7 +233,10 @@ mod tests {
         vp.set_dims(3, 5);
         let mut a = ListAdapter(&mut vp);
         // At top.
-        assert_eq!(a.handle_arrow(Direction::Up), ArrowResult::Escaped(Direction::Up));
+        assert_eq!(
+            a.handle_arrow(Direction::Up),
+            ArrowResult::Escaped(Direction::Up)
+        );
     }
 
     #[test]
@@ -246,8 +255,14 @@ mod tests {
         let mut vp = Viewport::new();
         vp.set_dims(0, 5);
         let mut a = ListAdapter(&mut vp);
-        assert_eq!(a.handle_arrow(Direction::Up), ArrowResult::Escaped(Direction::Up));
-        assert_eq!(a.handle_arrow(Direction::Down), ArrowResult::Escaped(Direction::Down));
+        assert_eq!(
+            a.handle_arrow(Direction::Up),
+            ArrowResult::Escaped(Direction::Up)
+        );
+        assert_eq!(
+            a.handle_arrow(Direction::Down),
+            ArrowResult::Escaped(Direction::Down)
+        );
     }
 
     /// X-only adapter for testing radio-row escape.
@@ -278,7 +293,10 @@ mod tests {
     #[test]
     fn x_only_radio_at_first_left_escapes() {
         let mut r = RadioAdapter { index: 0, max: 3 };
-        assert_eq!(r.handle_arrow(Direction::Left), ArrowResult::Escaped(Direction::Left));
+        assert_eq!(
+            r.handle_arrow(Direction::Left),
+            ArrowResult::Escaped(Direction::Left)
+        );
     }
 
     #[test]
@@ -291,7 +309,10 @@ mod tests {
     #[test]
     fn x_only_vertical_arrow_escapes() {
         let mut r = RadioAdapter { index: 1, max: 3 };
-        assert_eq!(r.handle_arrow(Direction::Up), ArrowResult::Escaped(Direction::Up));
+        assert_eq!(
+            r.handle_arrow(Direction::Up),
+            ArrowResult::Escaped(Direction::Up)
+        );
     }
 
     #[test]
@@ -302,15 +323,27 @@ mod tests {
             EscapeOutcome::SwitchZone(FocusZone::CheckoutControls),
         );
         assert_eq!(
-            escape_to_parent(TabId::Checkout, FocusZone::CheckoutHostTable, Direction::Down),
+            escape_to_parent(
+                TabId::Checkout,
+                FocusZone::CheckoutHostTable,
+                Direction::Down
+            ),
             EscapeOutcome::Stop,
         );
         assert_eq!(
-            escape_to_parent(TabId::Checkout, FocusZone::CheckoutHostTable, Direction::Left),
+            escape_to_parent(
+                TabId::Checkout,
+                FocusZone::CheckoutHostTable,
+                Direction::Left
+            ),
             EscapeOutcome::Stop,
         );
         assert_eq!(
-            escape_to_parent(TabId::Checkout, FocusZone::CheckoutControls, Direction::Down),
+            escape_to_parent(
+                TabId::Checkout,
+                FocusZone::CheckoutControls,
+                Direction::Down
+            ),
             EscapeOutcome::SwitchZone(FocusZone::CheckoutHostTable),
         );
         assert_eq!(

@@ -8,18 +8,25 @@ use crate::output::printer;
 use crate::output::report::{FilterInfo, HostResult, OperationReport, ReportSummary};
 use crate::output::summary::Summary;
 
+use super::report::{CommandReport, HostStatus, ProgressSink, RunHostResult, RunReport};
 use super::Context;
 
-pub async fn run(
+/// Pure command core: resolves targets, spawns per-host `run` tasks, writes
+/// to the operation log, and returns a typed `RunReport`.
+///
+/// No `println!`, no `output::printer` calls — those belong to the CLI
+/// wrapper. Per-host events are surfaced via the optional `ProgressSink`.
+pub async fn run_core(
     ctx: &Context,
     command: &str,
     sudo: bool,
     _yes: bool,
-    output: &crate::cli::OutputArgs,
-) -> Result<()> {
+    progress: Option<&dyn ProgressSink>,
+) -> Result<CommandReport> {
     let hosts = ctx.resolve_hosts()?;
+    let executed_at = chrono::Utc::now().to_rfc3339();
+    let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
 
-    // Set up SSH connection pool
     let (pool, _connected) = SshPool::setup(
         &hosts,
         ctx.timeout,
@@ -28,18 +35,21 @@ pub async fn run(
     )
     .await?;
 
-    let mut summary = Summary::default();
-    let mut report_results: Vec<HostResult> = Vec::new();
+    let mut host_results: Vec<RunHostResult> = Vec::new();
 
-    // Report unreachable hosts
+    // Report unreachable hosts.
     for (name, err) in pool.failed_hosts() {
-        printer::print_host_line(&name, "error", &format!("unreachable — {}", err));
-        summary.add_failure(&name, &err);
-        report_results.push(HostResult {
+        let detail = format!("unreachable — {}", err);
+        if let Some(p) = progress {
+            p.host_completed(&name, HostStatus::Unreachable, &detail, 0);
+        }
+        host_results.push(RunHostResult {
             host: name.clone(),
-            status: "error".to_string(),
+            status: HostStatus::Unreachable,
             duration_ms: None,
-            output: serde_json::json!({ "stdout": "", "stderr": format!("unreachable: {}", err) }),
+            detail,
+            stdout: String::new(),
+            stderr: err.clone(),
         });
     }
 
@@ -56,6 +66,9 @@ pub async fn run(
         let timeout = ctx.timeout;
         let sessions = pool.session_pool.clone();
         let global_sem = pool.limiter.global_semaphore();
+        if let Some(p) = progress {
+            p.host_started(&host.name);
+        }
 
         handles.push(tokio::spawn(async move {
             let _permit = global_sem.acquire_owned().await.unwrap();
@@ -68,38 +81,29 @@ pub async fn run(
 
     for handle in handles {
         let (host, result, elapsed) = handle.await?;
-        let duration_ms = elapsed.as_millis() as u64;
+        let ms = elapsed.as_millis() as u64;
         let now = chrono::Utc::now().timestamp();
 
         match result {
             Ok(exec_output) => {
-                if exec_output.success {
-                    for line in exec_output.stdout.lines() {
-                        printer::print_host_line(&host.name, "ok", line);
-                    }
-                    summary.add_success();
-                    report_results.push(HostResult {
-                        host: host.name.clone(),
-                        status: "success".to_string(),
-                        duration_ms: Some(duration_ms),
-                        output: serde_json::json!({
-                            "stdout": exec_output.stdout,
-                            "stderr": exec_output.stderr,
-                        }),
-                    });
+                let (status, detail) = if exec_output.success {
+                    let first_line = exec_output.stdout.lines().next().unwrap_or("").to_string();
+                    let detail = if first_line.is_empty() {
+                        format!("ok ({:.1}s)", elapsed.as_secs_f64())
+                    } else {
+                        format!("ok ({:.1}s) — {}", elapsed.as_secs_f64(), first_line)
+                    };
+                    (HostStatus::Online, detail)
                 } else {
                     let msg = exec_output.stderr.trim().to_string();
-                    printer::print_host_line(&host.name, "error", &msg);
-                    summary.add_failure(&host.name, &msg);
-                    report_results.push(HostResult {
-                        host: host.name.clone(),
-                        status: "error".to_string(),
-                        duration_ms: Some(duration_ms),
-                        output: serde_json::json!({
-                            "stdout": exec_output.stdout,
-                            "stderr": exec_output.stderr,
-                        }),
-                    });
+                    (
+                        HostStatus::Error,
+                        format!("error ({:.1}s) — {}", elapsed.as_secs_f64(), msg),
+                    )
+                };
+
+                if let Some(p) = progress {
+                    p.host_completed(&host.name, status, &detail, ms);
                 }
 
                 ctx.db.execute(
@@ -109,22 +113,26 @@ pub async fn run(
                         now,
                         host.name,
                         command,
-                        if exec_output.success { "ok" } else { "error" },
+                        if matches!(status, HostStatus::Online) { "ok" } else { "error" },
                         elapsed.as_millis() as i64,
-                        if exec_output.success { None::<String> } else { Some(exec_output.stderr.trim().to_string()) },
+                        if matches!(status, HostStatus::Error) { Some(exec_output.stderr.trim().to_string()) } else { None::<String> },
                     ],
                 )?;
+
+                host_results.push(RunHostResult {
+                    host: host.name.clone(),
+                    status,
+                    duration_ms: Some(ms),
+                    detail,
+                    stdout: exec_output.stdout,
+                    stderr: exec_output.stderr,
+                });
             }
             Err(e) => {
-                printer::print_host_line(&host.name, "error", &e.to_string());
-                summary.add_failure(&host.name, &e.to_string());
-                report_results.push(HostResult {
-                    host: host.name.clone(),
-                    status: "error".to_string(),
-                    duration_ms: Some(duration_ms),
-                    output: serde_json::json!({ "stdout": "", "stderr": e.to_string() }),
-                });
-
+                let detail = format!("error ({:.1}s) — {}", elapsed.as_secs_f64(), e);
+                if let Some(p) = progress {
+                    p.host_completed(&host.name, HostStatus::Error, &detail, ms);
+                }
                 ctx.db.execute(
                     "INSERT INTO operation_log (timestamp, command, host, action, status, duration_ms, note) \
                      VALUES (?1, 'run', ?2, ?3, 'error', ?4, ?5)",
@@ -134,11 +142,67 @@ pub async fn run(
                         e.to_string(),
                     ],
                 )?;
+                host_results.push(RunHostResult {
+                    host: host.name.clone(),
+                    status: HostStatus::Error,
+                    duration_ms: Some(ms),
+                    detail,
+                    stdout: String::new(),
+                    stderr: e.to_string(),
+                });
             }
         }
     }
 
     pool.shutdown().await;
+
+    Ok(CommandReport::Run(RunReport {
+        executed_at,
+        command: command.to_string(),
+        targets,
+        hosts: host_results,
+    }))
+}
+
+/// Thin CLI wrapper: invokes `run_core` with a printer-driven `ProgressSink`,
+/// prints the run summary, and writes `--out` reports.
+pub async fn run(
+    ctx: &Context,
+    command: &str,
+    sudo: bool,
+    yes: bool,
+    output: &crate::cli::OutputArgs,
+) -> Result<()> {
+    let sink = PrinterSink;
+    let CommandReport::Run(report) = run_core(ctx, command, sudo, yes, Some(&sink)).await? else {
+        unreachable!("run_core always returns CommandReport::Run")
+    };
+
+    let mut summary = Summary::default();
+    let mut report_results: Vec<HostResult> = Vec::new();
+    for h in &report.hosts {
+        match h.status {
+            HostStatus::Online => summary.add_success(),
+            HostStatus::Unreachable | HostStatus::Error => {
+                summary.add_failure(&h.host, &h.detail);
+            }
+            _ => {}
+        }
+        let status_str = match h.status {
+            HostStatus::Online => "success",
+            _ => "error",
+        };
+        report_results.push(HostResult {
+            host: h.host.clone(),
+            status: status_str.to_string(),
+            duration_ms: h.duration_ms,
+            output: serde_json::json!({
+                "stdout": h.stdout,
+                "stderr": h.stderr,
+            }),
+        });
+    }
+
     summary.print();
 
     if let Some(out) = &output.out {
@@ -154,9 +218,13 @@ pub async fn run(
                 .count(),
             skipped: 0,
         };
-        let targets: Vec<String> = hosts.iter().map(|h| h.name.clone()).collect();
-        let report = OperationReport {
-            executed_at: chrono::Utc::now().to_rfc3339(),
+        let targets: Vec<String> = ctx
+            .resolve_hosts()?
+            .iter()
+            .map(|h| h.name.clone())
+            .collect();
+        let rep = OperationReport {
+            executed_at: report.executed_at,
             command: "run".to_string(),
             filter: FilterInfo::from_mode(&ctx.mode),
             task: serde_json::json!({ "command": command }),
@@ -165,7 +233,7 @@ pub async fn run(
             summary: rep_summary,
         };
         crate::output::report::write_report(
-            &report,
+            &rep,
             out,
             "run",
             ctx.config.settings.default_output_format.as_deref(),
@@ -173,4 +241,19 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// `ProgressSink` impl that prints to stdout via the existing `output::printer`.
+struct PrinterSink;
+
+impl ProgressSink for PrinterSink {
+    fn host_started(&self, _host: &str) {}
+
+    fn host_completed(&self, host: &str, status: HostStatus, detail: &str, _ms: u64) {
+        let kind = match status {
+            HostStatus::Online => "ok",
+            _ => "error",
+        };
+        printer::print_host_line(host, kind, detail);
+    }
 }

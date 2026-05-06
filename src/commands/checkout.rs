@@ -112,7 +112,10 @@ pub async fn run(
 }
 
 /// Fetch the latest snapshot for each host.
-pub(crate) fn fetch_latest_snapshots(ctx: &Context, host_names: &[&str]) -> Result<Vec<HostSnapshot>> {
+pub(crate) fn fetch_latest_snapshots(
+    ctx: &Context,
+    host_names: &[&str],
+) -> Result<Vec<HostSnapshot>> {
     let mut snapshots = Vec::new();
     for host in host_names {
         let mut stmt = ctx.db.prepare(
@@ -432,4 +435,3 @@ fn print_table_report(snapshots: &[HostSnapshot], columns: &DisplayColumns) {
         println!("{}", line);
     }
 }
-

@@ -79,8 +79,7 @@ impl FilterPopup {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> FilterPopupResult {
         // Ctrl+C inside popup also cancels.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c'))
-        {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             return FilterPopupResult::Cancelled;
         }
         match key.code {
@@ -105,7 +104,11 @@ impl FilterPopup {
             KeyCode::Left | KeyCode::Right => {
                 // Cycle within Mode group; for Hosts/Groups/Shell this also
                 // cycles which item is "selected" in the chip list.
-                let dir: i32 = if matches!(key.code, KeyCode::Left) { -1 } else { 1 };
+                let dir: i32 = if matches!(key.code, KeyCode::Left) {
+                    -1
+                } else {
+                    1
+                };
                 self.cycle_chip(dir);
                 FilterPopupResult::Continue
             }
@@ -130,10 +133,7 @@ impl FilterPopup {
 
     fn move_field(&mut self, delta: i32) {
         let order = self.fields_in_order();
-        let idx = order
-            .iter()
-            .position(|f| *f == self.field)
-            .unwrap_or(0);
+        let idx = order.iter().position(|f| *f == self.field).unwrap_or(0);
         let len = order.len() as i32;
         let new = ((idx as i32 + delta).rem_euclid(len)) as usize;
         self.field = order[new];
@@ -247,7 +247,10 @@ impl FilterPopup {
         // gap row already counted into constraints
         row += 1;
         let serial_glyph = if self.state.serial { "☑" } else { "☐" };
-        let serial_text = format!(" {} Serial execution    Timeout: {}s", serial_glyph, self.state.timeout);
+        let serial_text = format!(
+            " {} Serial execution    Timeout: {}s",
+            serial_glyph, self.state.timeout
+        );
         let serial_focused = self.field == Field::SerialToggle;
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -265,7 +268,10 @@ impl FilterPopup {
             Span::raw("   "),
             Span::styled("[Cancel]", focus_style(cancel_focused, theme)),
         ]);
-        frame.render_widget(Paragraph::new(buttons).wrap(Wrap { trim: false }), chunks[row]);
+        frame.render_widget(
+            Paragraph::new(buttons).wrap(Wrap { trim: false }),
+            chunks[row],
+        );
     }
 }
 

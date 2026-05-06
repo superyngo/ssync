@@ -15,8 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal,
+    execute, terminal,
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -31,16 +30,17 @@ use crate::commands::checkout::{
     extract_metric_value, fetch_latest_snapshots, format_relative_time, metric_header,
     metric_width, DisplayColumns, HostSnapshot,
 };
-use crate::commands::report::{CheckReport, HostStatus};
+use crate::commands::report::{CommandReport, HostStatus};
 use crate::commands::{Context, TargetMode};
 use crate::config::schema::AppConfig;
 
 use super::async_bridge::{EventSender, RunningOp, TuiEvent};
+use super::components::input_field::{InputField, InputMode};
 use super::components::popup::centered_rect;
 use super::components::target_filter::{FilterPopup, FilterPopupResult};
 use super::components::viewport::Viewport;
 use super::state::persist::{
-    self, ActiveTab, TargetFilterMode, TargetFilterState, TuiPersistedState,
+    self, ActiveTab, OperationKind, TargetFilterMode, TargetFilterState, TuiPersistedState,
 };
 use super::tabs::config_tab::ConfigTabState;
 use super::tabs::TabId;
@@ -50,11 +50,22 @@ const MIN_COLS: u16 = 80;
 const MIN_ROWS: u16 = 24;
 const POLL_INTERVAL_MS: u64 = 50;
 
-/// Operate-tab focused element (Phase 3 minimal model).
+/// Operate-tab focused element (Phase 5 model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OperateFocus {
+    OpRadio,
+    ParamPanel,
     TargetRow,
     Execute,
+}
+
+/// Which field in the param panel has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ParamPanelField {
+    #[default]
+    CommandOrScript,
+    Sudo,
+    SecondFlag, // `yes` for Run, `keep` for Exec
 }
 
 pub struct App {
@@ -73,12 +84,23 @@ pub struct App {
     config_tab: ConfigTabState,
     /// Set by `handle_key` when `E` is pressed; drained by `run()` after each event.
     needs_editor_open: bool,
-    /// Until this instant the Config tab shows a yellow "Config reloaded" banner.
-    config_reload_banner_until: Option<Instant>,
     pub state_file_path: PathBuf,
     pub target_filter: TargetFilterState,
     pub filter_popup: Option<FilterPopup>,
     operate_focus: OperateFocus,
+    /// Currently-selected operation on the Operate tab.
+    operate_operation: OperationKind,
+    /// Text input for the `run` command field (NOT persisted per AD-12).
+    run_command: InputField,
+    /// Text input for the `exec` script path field (NOT persisted per AD-12).
+    exec_script: InputField,
+    /// Sudo / yes / keep boolean params (persisted per AD-12).
+    run_sudo: bool,
+    run_yes: bool,
+    exec_sudo: bool,
+    exec_keep: bool,
+    /// Which param panel field is focused (when operate_focus == ParamPanel).
+    param_field: ParamPanelField,
     /// Currently-running operation, if any. Mutually exclusive with starting
     /// a new one (concurrency guard per Phase 3 step 10).
     running_op: Option<RunningOp>,
@@ -88,7 +110,7 @@ pub struct App {
     event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<TuiEvent>>,
     /// Final report from the most recently completed operation, shown in the
     /// results popup until dismissed.
-    completed_report: Option<CheckReport>,
+    completed_report: Option<CommandReport>,
     /// True when a snapshot DB write happened in this session and the
     /// Checkout tab needs to reload before its next render (§18.3).
     db_stale: bool,
@@ -143,11 +165,18 @@ impl App {
             config_path: ctx.config_path.clone(),
             config_tab,
             needs_editor_open: false,
-            config_reload_banner_until: None,
             state_file_path,
             target_filter: persisted.target_filter,
             filter_popup: None,
             operate_focus: OperateFocus::Execute,
+            operate_operation: persisted.operate.operation,
+            run_command: InputField::new(""),
+            exec_script: InputField::new(""),
+            run_sudo: persisted.operate.run_sudo,
+            run_yes: persisted.operate.run_yes,
+            exec_sudo: persisted.operate.exec_sudo,
+            exec_keep: persisted.operate.exec_keep,
+            param_field: ParamPanelField::CommandOrScript,
             running_op: None,
             event_tx,
             event_rx: Some(event_rx),
@@ -164,7 +193,13 @@ impl App {
                 active_tab: ActiveTab::from_tab_id(self.active_tab),
             },
             target_filter: self.target_filter.clone(),
-            operate: Default::default(),
+            operate: super::state::persist::OperateState {
+                operation: self.operate_operation,
+                run_sudo: self.run_sudo,
+                run_yes: self.run_yes,
+                exec_sudo: self.exec_sudo,
+                exec_keep: self.exec_keep,
+            },
         };
         if let Err(e) = persist::save(&self.state_file_path, &state) {
             tracing::warn!(
@@ -233,9 +268,9 @@ impl App {
             }
 
             // Expire the "Config reloaded" banner so it disappears after 2s.
-            if let Some(until) = self.config_reload_banner_until {
+            if let Some(until) = self.config_tab.reload_banner_until {
                 if Instant::now() >= until {
-                    self.config_reload_banner_until = None;
+                    self.config_tab.reload_banner_until = None;
                     dirty = true;
                 }
             }
@@ -336,7 +371,12 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, verbose,
+                        cfg,
+                        cfg_path,
+                        target_mode,
+                        serial,
+                        timeout,
+                        verbose,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -353,7 +393,175 @@ impl App {
                         }
                     };
                     match outcome {
-                        Ok(crate::commands::report::CommandReport::Check(report)) => {
+                        Ok(report) => {
+                            let _ = event_tx.send(TuiEvent::OperationFinished(report));
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                        }
+                    }
+                });
+            });
+
+        self.running_op = Some(RunningOp {
+            cancel,
+            started_at: std::time::Instant::now(),
+            targets,
+            host_outcomes: Vec::new(),
+        });
+        true
+    }
+
+    /// Execute a `run` command against the current target filter.
+    fn execute_run(&mut self) -> bool {
+        if self.running_op.is_some() {
+            self.error = Some("Operation already running".to_string());
+            return true;
+        }
+        let command = self.run_command.value.trim().to_string();
+        if command.is_empty() {
+            self.error = Some("Command field is empty.".to_string());
+            return true;
+        }
+        let target_mode = build_target_mode(&self.target_filter, &self.config);
+        let targets: Vec<String> = match resolve_target_names(&target_mode, &self.config) {
+            Ok(t) if !t.is_empty() => t,
+            Ok(_) => {
+                self.error = Some("No hosts matched the current filter.".to_string());
+                return true;
+            }
+            Err(e) => {
+                self.error = Some(format!("Filter error: {e}"));
+                return true;
+            }
+        };
+        let serial = self.target_filter.serial;
+        let timeout = self.last_timeout_secs;
+        let cfg = self.config.clone();
+        let cfg_path = self.config_path.clone();
+        let event_tx = self.event_tx.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let sudo = self.run_sudo;
+        let yes = self.run_yes;
+
+        let _ = std::thread::Builder::new()
+            .name("ssync-op".to_string())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let ctx = match Context::from_tui_parts(
+                        cfg, cfg_path, target_mode, serial, timeout, false,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                            return;
+                        }
+                    };
+                    let sink = EventSender::new(event_tx.clone());
+                    let outcome = tokio::select! {
+                        res = crate::commands::run::run_core(&ctx, &command, sudo, yes, Some(&sink)) => res,
+                        _ = cancel_for_task.cancelled() => {
+                            let _ = event_tx.send(TuiEvent::OperationCancelled);
+                            return;
+                        }
+                    };
+                    match outcome {
+                        Ok(report) => {
+                            let _ = event_tx.send(TuiEvent::OperationFinished(report));
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                        }
+                    }
+                });
+            });
+
+        self.running_op = Some(RunningOp {
+            cancel,
+            started_at: std::time::Instant::now(),
+            targets,
+            host_outcomes: Vec::new(),
+        });
+        true
+    }
+
+    /// Execute an `exec` (script upload + run) against the current target filter.
+    fn execute_exec(&mut self) -> bool {
+        if self.running_op.is_some() {
+            self.error = Some("Operation already running".to_string());
+            return true;
+        }
+        let script = self.exec_script.value.trim().to_string();
+        if script.is_empty() {
+            self.error = Some("Script path field is empty.".to_string());
+            return true;
+        }
+        let target_mode = build_target_mode(&self.target_filter, &self.config);
+        let targets: Vec<String> = match resolve_target_names(&target_mode, &self.config) {
+            Ok(t) if !t.is_empty() => t,
+            Ok(_) => {
+                self.error = Some("No hosts matched the current filter.".to_string());
+                return true;
+            }
+            Err(e) => {
+                self.error = Some(format!("Filter error: {e}"));
+                return true;
+            }
+        };
+        let serial = self.target_filter.serial;
+        let timeout = self.last_timeout_secs;
+        let cfg = self.config.clone();
+        let cfg_path = self.config_path.clone();
+        let event_tx = self.event_tx.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let sudo = self.exec_sudo;
+        let keep = self.exec_keep;
+
+        let _ = std::thread::Builder::new()
+            .name("ssync-op".to_string())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let ctx = match Context::from_tui_parts(
+                        cfg, cfg_path, target_mode, serial, timeout, false,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = event_tx.send(TuiEvent::OperationError(e.to_string()));
+                            return;
+                        }
+                    };
+                    let sink = EventSender::new(event_tx.clone());
+                    let outcome = tokio::select! {
+                        res = crate::commands::exec::exec_core(&ctx, &script, sudo, false, keep, Some(&sink)) => res,
+                        _ = cancel_for_task.cancelled() => {
+                            let _ = event_tx.send(TuiEvent::OperationCancelled);
+                            return;
+                        }
+                    };
+                    match outcome {
+                        Ok(report) => {
                             let _ = event_tx.send(TuiEvent::OperationFinished(report));
                         }
                         Err(e) => {
@@ -418,6 +626,20 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;
             return Ok(true);
+        }
+
+        // §14.3: while an input field is active, suspend ALL other routing.
+        if self.active_tab == TabId::Operate {
+            let active_field = match self.operate_operation {
+                OperationKind::Run => Some(&mut self.run_command),
+                OperationKind::Exec => Some(&mut self.exec_script),
+                _ => None,
+            };
+            if let Some(field) = active_field {
+                if field.mode == InputMode::Active {
+                    return Ok(field.handle_key(key));
+                }
+            }
         }
 
         // Filter popup is the highest-priority focus root after Ctrl+C.
@@ -554,8 +776,7 @@ impl App {
                     self.error =
                         Some("Cannot edit config while an operation is running.".to_string());
                 } else if self.config_path.is_none() {
-                    self.error =
-                        Some("No config path set — cannot open editor.".to_string());
+                    self.error = Some("No config path set — cannot open editor.".to_string());
                 } else {
                     self.needs_editor_open = true;
                 }
@@ -567,26 +788,152 @@ impl App {
             }
 
             // ── Operate tab ────────────────────────────────────────────────
+            // Vertical navigation between zones (OpRadio → ParamPanel → TargetRow → Execute).
             KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Operate => {
-                self.operate_focus = OperateFocus::TargetRow;
+                self.operate_focus = match self.operate_focus {
+                    OperateFocus::Execute => OperateFocus::TargetRow,
+                    OperateFocus::TargetRow => {
+                        if self.operate_operation == OperationKind::Check
+                            || self.operate_operation == OperationKind::Sync
+                        {
+                            OperateFocus::OpRadio
+                        } else {
+                            OperateFocus::ParamPanel
+                        }
+                    }
+                    OperateFocus::ParamPanel => {
+                        // Move up inside param panel or leave it.
+                        match self.param_field {
+                            ParamPanelField::SecondFlag => {
+                                self.param_field = ParamPanelField::Sudo;
+                            }
+                            ParamPanelField::Sudo => {
+                                self.param_field = ParamPanelField::CommandOrScript;
+                            }
+                            ParamPanelField::CommandOrScript => {
+                                return Ok(true); // at top of panel, stay
+                            }
+                        }
+                        OperateFocus::ParamPanel
+                    }
+                    OperateFocus::OpRadio => OperateFocus::OpRadio,
+                };
                 Ok(true)
             }
             KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Operate => {
-                self.operate_focus = OperateFocus::Execute;
+                self.operate_focus = match self.operate_focus {
+                    OperateFocus::OpRadio => {
+                        if self.operate_operation == OperationKind::Check
+                            || self.operate_operation == OperationKind::Sync
+                        {
+                            OperateFocus::TargetRow
+                        } else {
+                            self.param_field = ParamPanelField::CommandOrScript;
+                            OperateFocus::ParamPanel
+                        }
+                    }
+                    OperateFocus::ParamPanel => {
+                        match self.param_field {
+                            ParamPanelField::CommandOrScript => {
+                                self.param_field = ParamPanelField::Sudo;
+                            }
+                            ParamPanelField::Sudo => {
+                                self.param_field = ParamPanelField::SecondFlag;
+                            }
+                            ParamPanelField::SecondFlag => {
+                                return Ok(true); // at bottom, delegate to next zone
+                            }
+                        }
+                        OperateFocus::ParamPanel
+                    }
+                    OperateFocus::TargetRow => OperateFocus::Execute,
+                    OperateFocus::Execute => OperateFocus::Execute,
+                };
+                Ok(true)
+            }
+            // Left/Right on OpRadio cycles the selected operation.
+            KeyCode::Left
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::OpRadio =>
+            {
+                self.operate_operation = match self.operate_operation {
+                    OperationKind::Check => OperationKind::Sync,
+                    OperationKind::Run => OperationKind::Check,
+                    OperationKind::Exec => OperationKind::Run,
+                    OperationKind::Sync => OperationKind::Exec,
+                };
+                self.save_state();
+                Ok(true)
+            }
+            KeyCode::Right
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::OpRadio =>
+            {
+                self.operate_operation = match self.operate_operation {
+                    OperationKind::Check => OperationKind::Run,
+                    OperationKind::Run => OperationKind::Exec,
+                    OperationKind::Exec => OperationKind::Sync,
+                    OperationKind::Sync => OperationKind::Check,
+                };
+                self.save_state();
+                Ok(true)
+            }
+            // Enter on ParamPanel command/script field activates it.
+            KeyCode::Enter
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::ParamPanel
+                    && self.param_field == ParamPanelField::CommandOrScript =>
+            {
+                match self.operate_operation {
+                    OperationKind::Run => self.run_command.activate(),
+                    OperationKind::Exec => self.exec_script.activate(),
+                    _ => {}
+                }
+                Ok(true)
+            }
+            // Space on ParamPanel checkbox fields toggles them.
+            KeyCode::Char(' ')
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::ParamPanel =>
+            {
+                match (self.operate_operation, self.param_field) {
+                    (OperationKind::Run, ParamPanelField::Sudo) => {
+                        self.run_sudo = !self.run_sudo;
+                        self.save_state();
+                    }
+                    (OperationKind::Run, ParamPanelField::SecondFlag) => {
+                        self.run_yes = !self.run_yes;
+                        self.save_state();
+                    }
+                    (OperationKind::Exec, ParamPanelField::Sudo) => {
+                        self.exec_sudo = !self.exec_sudo;
+                        self.save_state();
+                    }
+                    (OperationKind::Exec, ParamPanelField::SecondFlag) => {
+                        self.exec_keep = !self.exec_keep;
+                        self.save_state();
+                    }
+                    _ => {}
+                }
                 Ok(true)
             }
             KeyCode::Enter
                 if self.active_tab == TabId::Operate
                     && self.operate_focus == OperateFocus::Execute =>
             {
-                Ok(self.execute_check())
+                Ok(match self.operate_operation {
+                    OperationKind::Check => self.execute_check(),
+                    OperationKind::Run => self.execute_run(),
+                    OperationKind::Exec => self.execute_exec(),
+                    OperationKind::Sync => {
+                        self.error =
+                            Some("Sync not yet wired in TUI (coming in Phase 6).".to_string());
+                        true
+                    }
+                })
             }
             KeyCode::Char('f') if self.active_tab == TabId::Operate => {
-                let popup = FilterPopup::new(
-                    self.target_filter.clone(),
-                    true,
-                    &self.config,
-                );
+                let popup = FilterPopup::new(self.target_filter.clone(), true, &self.config);
                 self.filter_popup = Some(popup);
                 Ok(true)
             }
@@ -674,7 +1021,10 @@ impl App {
 
     fn render_tab_bar(&self, area: Rect, frame: &mut ratatui::Frame) {
         let titles: Vec<&str> = TabId::ALL.iter().map(|t| t.label()).collect();
-        let selected = TabId::ALL.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+        let selected = TabId::ALL
+            .iter()
+            .position(|t| *t == self.active_tab)
+            .unwrap_or(0);
         let accent = match self.active_tab {
             TabId::Config => self.theme.accent_config,
             TabId::Operate => self.theme.accent_operate,
@@ -693,14 +1043,12 @@ impl App {
     }
 
     fn render_config(&mut self, area: Rect, frame: &mut ratatui::Frame) {
-        let banner_until = self.config_reload_banner_until;
         self.config_tab.render(
             area,
             frame,
             &self.theme,
             &self.config,
             self.config_path.as_deref(),
-            banner_until,
         );
     }
 
@@ -747,9 +1095,7 @@ impl App {
         }
 
         // Detect mtime change and reload config if file was modified.
-        let new_mtime = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok();
+        let new_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
 
         let should_reload = match (self.config_tab.config_mtime, new_mtime) {
             (Some(old), Some(new)) => old != new,
@@ -762,7 +1108,7 @@ impl App {
                 Ok(Some(new_config)) => {
                     self.config = new_config;
                     self.config_tab.reload(&self.config, Some(&path));
-                    self.config_reload_banner_until =
+                    self.config_tab.reload_banner_until =
                         Some(Instant::now() + Duration::from_secs(2));
                 }
                 Ok(None) => {
@@ -778,6 +1124,7 @@ impl App {
     }
 
     fn render_operate(&self, area: Rect, frame: &mut ratatui::Frame) {
+        use ratatui::style::Color;
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border_active))
@@ -785,33 +1132,138 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        let has_params = matches!(
+            self.operate_operation,
+            OperationKind::Run | OperationKind::Exec
+        );
+        let param_rows = if has_params { 7u16 } else { 0u16 };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2), // operation row
-                Constraint::Length(4), // target row + summary
-                Constraint::Min(0),    // applicable entries panel
-                Constraint::Length(3), // execute button
+                Constraint::Length(2),          // OpRadio row
+                Constraint::Length(param_rows), // param panel (0 for check/sync)
+                Constraint::Length(4),          // target row
+                Constraint::Min(0),             // applicable entries / spacer
+                Constraint::Length(3),          // execute button
             ])
             .split(inner);
 
-        // Operation row (only `check` is wired in MVP).
-        let op_row = Paragraph::new(Line::from(vec![
-            Span::raw(" Operation: "),
-            Span::styled(
-                "[◉ check]",
+        // Operation selector row (← → to cycle, active selection highlighted).
+        let radio_focused = self.operate_focus == OperateFocus::OpRadio;
+        let ops = [
+            (OperationKind::Check, "check"),
+            (OperationKind::Run, "run"),
+            (OperationKind::Exec, "exec"),
+            (OperationKind::Sync, "sync"),
+        ];
+        let mut spans = vec![Span::raw(" Operation: ")];
+        for (kind, label) in &ops {
+            let selected = *kind == self.operate_operation;
+            let (prefix, suffix) = if selected { ("◉ ", "") } else { ("○ ", "") };
+            let style = if selected && radio_focused {
                 Style::default()
                     .fg(self.theme.accent_operate)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("[ run ]", Style::default().fg(self.theme.inactive)),
-            Span::raw("  "),
-            Span::styled("[ exec ]", Style::default().fg(self.theme.inactive)),
-            Span::raw("  "),
-            Span::styled("[ sync ]", Style::default().fg(self.theme.inactive)),
-        ]));
-        frame.render_widget(op_row, chunks[0]);
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else if selected {
+                Style::default()
+                    .fg(self.theme.accent_operate)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.inactive)
+            };
+            spans.push(Span::styled(format!("[{prefix}{label}{suffix}]"), style));
+            spans.push(Span::raw("  "));
+        }
+        if radio_focused {
+            spans.push(Span::styled(
+                " ← → to change",
+                Style::default().fg(self.theme.inactive),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+
+        // Param panel (run/exec only).
+        if has_params {
+            let param_focused = self.operate_focus == OperateFocus::ParamPanel;
+            let param_area = chunks[1];
+            let param_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // text input
+                    Constraint::Length(1), // sudo
+                    Constraint::Length(1), // yes / keep
+                    Constraint::Min(0),
+                ])
+                .split(param_area);
+
+            // Text input field.
+            let field_focused =
+                param_focused && self.param_field == ParamPanelField::CommandOrScript;
+            let (field_label, field) = match self.operate_operation {
+                OperationKind::Run => ("Command", &self.run_command),
+                OperationKind::Exec => ("Script path", &self.exec_script),
+                _ => unreachable!(),
+            };
+            field.render(frame, param_chunks[0], field_label, field_focused);
+
+            // Sudo checkbox.
+            let sudo_focused = param_focused && self.param_field == ParamPanelField::Sudo;
+            let sudo_val = match self.operate_operation {
+                OperationKind::Run => self.run_sudo,
+                OperationKind::Exec => self.exec_sudo,
+                _ => false,
+            };
+            let sudo_style = if sudo_focused {
+                Style::default()
+                    .fg(self.theme.accent_operate)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(if sudo_val { "[✓] sudo" } else { "[ ] sudo" }, sudo_style),
+                    Span::styled(
+                        "  (Space to toggle)",
+                        Style::default().fg(self.theme.inactive),
+                    ),
+                ])),
+                param_chunks[1],
+            );
+
+            // Second flag: yes (run) or keep (exec).
+            let flag2_focused = param_focused && self.param_field == ParamPanelField::SecondFlag;
+            let (flag2_label, flag2_val) = match self.operate_operation {
+                OperationKind::Run => ("--yes (skip confirmation)", self.run_yes),
+                OperationKind::Exec => ("--keep (keep script after exec)", self.exec_keep),
+                _ => ("", false),
+            };
+            let flag2_style = if flag2_focused {
+                Style::default()
+                    .fg(self.theme.accent_operate)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        if flag2_val {
+                            format!("[✓] {flag2_label}")
+                        } else {
+                            format!("[ ] {flag2_label}")
+                        },
+                        flag2_style,
+                    ),
+                ])),
+                param_chunks[2],
+            );
+
+            // Dim border around the whole panel.
+            let _ = Color::DarkGray; // used below
+        }
 
         // Target row.
         let target_focused = self.operate_focus == OperateFocus::TargetRow;
@@ -830,10 +1282,7 @@ impl App {
         };
         let target_text = format!(
             " Target: {}  ({} hosts)    [f] Filter   serial={}   timeout={}s",
-            mode_summary,
-            target_count,
-            self.target_filter.serial,
-            self.target_filter.timeout,
+            mode_summary, target_count, self.target_filter.serial, self.target_filter.timeout,
         );
         let target_p = Paragraph::new(target_text).style(if target_focused {
             Style::default()
@@ -842,57 +1291,65 @@ impl App {
         } else {
             Style::default()
         });
-        frame.render_widget(target_p, chunks[1]);
+        frame.render_widget(target_p, chunks[2]);
 
-        // Applicable entries panel — read-only summary.
-        let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(Span::styled(
-            "─ Applicable [[check]] entries ─",
-            Style::default().fg(self.theme.inactive),
-        )));
-        if self.config.check.is_empty() {
+        // Applicable entries panel — read-only summary for check.
+        if self.operate_operation == OperationKind::Check {
+            let mut lines: Vec<Line> = Vec::new();
             lines.push(Line::from(Span::styled(
-                "  (no [[check]] entries — add one to config.toml)",
+                "─ Applicable [[check]] entries ─",
                 Style::default().fg(self.theme.inactive),
             )));
-        } else {
-            for (i, entry) in self.config.check.iter().enumerate().take(6) {
-                let label = entry
-                    .name
-                    .clone()
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| format!("Check #{}", i + 1));
-                let metrics = if entry.enabled.is_empty() {
-                    "(no metrics)".to_string()
-                } else {
-                    entry.enabled.join(",")
-                };
-                let groups = if entry.groups.is_empty() {
-                    "unscoped".to_string()
-                } else {
-                    format!("groups:[{}]", entry.groups.join(","))
-                };
-                lines.push(Line::from(format!(
-                    "  ▸ {} — {}  metrics:{}",
-                    label, groups, metrics
+            if self.config.check.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (no [[check]] entries — add one to config.toml)",
+                    Style::default().fg(self.theme.inactive),
                 )));
+            } else {
+                for (i, entry) in self.config.check.iter().enumerate().take(6) {
+                    let label = entry
+                        .name
+                        .clone()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| format!("Check #{}", i + 1));
+                    let metrics = if entry.enabled.is_empty() {
+                        "(no metrics)".to_string()
+                    } else {
+                        entry.enabled.join(",")
+                    };
+                    let groups = if entry.groups.is_empty() {
+                        "unscoped".to_string()
+                    } else {
+                        format!("groups:[{}]", entry.groups.join(","))
+                    };
+                    lines.push(Line::from(format!(
+                        "  ▸ {} — {}  metrics:{}",
+                        label, groups, metrics
+                    )));
+                }
+                if self.config.check.len() > 6 {
+                    lines.push(Line::from(format!(
+                        "  ... ({} more not shown)",
+                        self.config.check.len() - 6
+                    )));
+                }
             }
-            if self.config.check.len() > 6 {
-                lines.push(Line::from(format!(
-                    "  ... ({} more not shown)",
-                    self.config.check.len() - 6
-                )));
-            }
+            let panel = Paragraph::new(lines).wrap(Wrap { trim: false });
+            frame.render_widget(panel, chunks[3]);
         }
-        let panel = Paragraph::new(lines).wrap(Wrap { trim: false });
-        frame.render_widget(panel, chunks[2]);
 
         // [Execute] button.
         let execute_focused = self.operate_focus == OperateFocus::Execute;
+        let op_name = match self.operate_operation {
+            OperationKind::Check => "check",
+            OperationKind::Run => "run",
+            OperationKind::Exec => "exec",
+            OperationKind::Sync => "sync",
+        };
         let exec_label = if self.running_op.is_some() {
-            " [ running... — Esc to cancel ] "
+            " [ running... — Esc to cancel ] ".to_string()
         } else {
-            " [ Execute (Enter) ] "
+            format!(" [ Execute {op_name} (Enter) ] ")
         };
         let exec_style = if execute_focused && self.running_op.is_none() {
             Style::default()
@@ -905,16 +1362,22 @@ impl App {
         };
         let exec = Paragraph::new(Line::from(Span::styled(exec_label, exec_style)))
             .block(Block::default().borders(Borders::TOP));
-        frame.render_widget(exec, chunks[3]);
+        frame.render_widget(exec, chunks[4]);
     }
 
     fn render_progress_popup(&self, area: Rect, frame: &mut ratatui::Frame) {
         let popup_area = centered_rect(70, 70, area);
         frame.render_widget(Clear, popup_area);
+        let op_name = match self.operate_operation {
+            OperationKind::Check => "check",
+            OperationKind::Run => "run",
+            OperationKind::Exec => "exec",
+            OperationKind::Sync => "sync",
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border_active))
-            .title(" Running check — Esc to cancel ");
+            .title(format!(" Running {op_name} — Esc to cancel "));
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
 
@@ -942,10 +1405,12 @@ impl App {
                 HostStatus::Unreachable => "⊘",
                 HostStatus::TimedOut => "⏱",
                 HostStatus::Error => "✗",
+                HostStatus::Skipped => "⊘",
             };
             let color = match status {
                 HostStatus::Online => self.theme.accent_checkout,
                 HostStatus::Partial => self.theme.warning,
+                HostStatus::Skipped => self.theme.inactive,
                 _ => self.theme.error,
             };
             let line = format!(
@@ -962,13 +1427,26 @@ impl App {
         frame.render_widget(p, inner);
     }
 
-    fn render_results_popup(&self, area: Rect, frame: &mut ratatui::Frame, report: &CheckReport) {
+    fn render_results_popup(&self, area: Rect, frame: &mut ratatui::Frame, report: &CommandReport) {
         let popup_area = centered_rect(75, 75, area);
         frame.render_widget(Clear, popup_area);
-        let title = format!(
-            " Results — {} hosts  (Enter / Esc to dismiss) ",
-            report.hosts.len()
-        );
+
+        // Extract common fields for any variant.
+        let (host_count, executed_at, header_detail): (usize, &str, String) = match report {
+            CommandReport::Check(r) => (r.hosts.len(), r.executed_at.as_str(), String::new()),
+            CommandReport::Run(r) => (
+                r.hosts.len(),
+                r.executed_at.as_str(),
+                format!("  cmd: {}", truncate(&r.command, 50)),
+            ),
+            CommandReport::Exec(r) => (
+                r.hosts.len(),
+                r.executed_at.as_str(),
+                format!("  script: {}", truncate(&r.script, 50)),
+            ),
+        };
+
+        let title = format!(" Results — {host_count} hosts  (Enter / Esc to dismiss) ");
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border_active))
@@ -977,42 +1455,100 @@ impl App {
         frame.render_widget(block, popup_area);
 
         let mut lines: Vec<Line> = Vec::new();
-        let total = report.hosts.len();
-        let online = report
-            .hosts
-            .iter()
-            .filter(|h| matches!(h.status, HostStatus::Online | HostStatus::Partial))
-            .count();
-        let offline = total - online;
-        lines.push(Line::from(format!(
-            "Summary: {} ok / {} fail    Executed: {}",
-            online, offline, report.executed_at
-        )));
-        lines.push(Line::from(""));
 
-        for h in &report.hosts {
-            let glyph = match h.status {
+        // Helper closure to render a per-host row.
+        let render_row = |host: &str, status: HostStatus, detail: &str, ms: Option<u64>| {
+            let glyph = match status {
                 HostStatus::Online => "✓",
                 HostStatus::Partial => "⚠",
-                HostStatus::Offline => "✗",
+                HostStatus::Offline | HostStatus::Error => "✗",
                 HostStatus::Unreachable => "⊘",
                 HostStatus::TimedOut => "⏱",
-                HostStatus::Error => "✗",
+                HostStatus::Skipped => "⊘",
             };
-            let color = match h.status {
+            let color = match status {
                 HostStatus::Online => self.theme.accent_checkout,
                 HostStatus::Partial => self.theme.warning,
+                HostStatus::Skipped => self.theme.inactive,
                 _ => self.theme.error,
             };
-            let ms = h.duration_ms.unwrap_or(0);
+            let ms_val = ms.unwrap_or(0);
             let line = format!(
                 "  {} {:<16} ({:>4}ms) — {}",
                 glyph,
-                truncate(&h.host, 16),
-                ms,
-                truncate(&h.detail, 80),
+                truncate(host, 16),
+                ms_val,
+                truncate(detail, 80),
             );
-            lines.push(Line::from(Span::styled(line, Style::default().fg(color))));
+            Line::from(Span::styled(line, Style::default().fg(color)))
+        };
+
+        match report {
+            CommandReport::Check(r) => {
+                let ok = r
+                    .hosts
+                    .iter()
+                    .filter(|h| matches!(h.status, HostStatus::Online | HostStatus::Partial))
+                    .count();
+                let fail = r.hosts.len() - ok;
+                lines.push(Line::from(format!(
+                    "Summary: {ok} ok / {fail} fail    Executed: {executed_at}"
+                )));
+                lines.push(Line::from(""));
+                for h in &r.hosts {
+                    lines.push(render_row(&h.host, h.status, &h.detail, h.duration_ms));
+                }
+            }
+            CommandReport::Run(r) => {
+                let ok = r
+                    .hosts
+                    .iter()
+                    .filter(|h| h.status == HostStatus::Online)
+                    .count();
+                let fail = r.hosts.len() - ok;
+                lines.push(Line::from(format!(
+                    "Summary: {ok} ok / {fail} fail    Executed: {executed_at}"
+                )));
+                lines.push(Line::from(header_detail));
+                lines.push(Line::from(""));
+                for h in &r.hosts {
+                    lines.push(render_row(&h.host, h.status, &h.detail, h.duration_ms));
+                    // Show first line of stdout for context.
+                    if !h.stdout.is_empty() {
+                        let first = h.stdout.lines().next().unwrap_or("").trim();
+                        if !first.is_empty() {
+                            lines.push(Line::from(format!("     ↳ {}", truncate(first, 70))));
+                        }
+                    }
+                }
+            }
+            CommandReport::Exec(r) => {
+                let ok = r
+                    .hosts
+                    .iter()
+                    .filter(|h| h.status == HostStatus::Online)
+                    .count();
+                let skipped = r
+                    .hosts
+                    .iter()
+                    .filter(|h| h.status == HostStatus::Skipped)
+                    .count();
+                let fail = r.hosts.len() - ok - skipped;
+                lines.push(Line::from(format!(
+                    "Summary: {ok} ok / {fail} fail / {skipped} skipped    Executed: {executed_at}"
+                )));
+                lines.push(Line::from(header_detail));
+                lines.push(Line::from(""));
+                for h in &r.hosts {
+                    lines.push(render_row(&h.host, h.status, &h.detail, h.duration_ms));
+                    if !h.stdout.is_empty() {
+                        let first = h.stdout.lines().next().unwrap_or("").trim();
+                        if !first.is_empty() {
+                            lines.push(Line::from(format!("     ↳ {}", truncate(first, 70))));
+                        }
+                    }
+                }
+            }
         }
 
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1024,7 +1560,7 @@ impl App {
         frame.render_widget(Clear, popup_area);
         let body = match self.active_tab {
             TabId::Operate => format!(
-                "Operate tab\n\nThe currently configured operation is `check`.\nUse `f` to change the target filter; press Enter on the [Execute] button to run.\nWhile a check is in progress, Esc cancels cooperatively (may take up to {}s per host).\n\nResults appear in a popup when the operation completes; the Checkout tab is automatically refreshed.",
+                "Operate tab\n\nSelect an operation with ← → on the Operation row.\n\ncheck — collect host metrics and write to DB.\nrun   — execute a shell command on all targets.\nexec  — upload and run a local script on targets.\nsync  — sync files between hosts (Phase 6).\n\nUse `f` to change the target filter; press Enter on [Execute] to run.\nEsc cancels a running operation (may take up to {}s per host).\n\nResults appear in a popup when the operation completes.",
                 self.last_timeout_secs
             ),
             TabId::Checkout => "Checkout tab\n\nLatest snapshot per host. Use ↑↓/jk/PgUp/PgDn/Home/End to scroll.\nData refreshes automatically after each `check` run from Operate.".to_string(),
@@ -1073,10 +1609,8 @@ impl App {
             return;
         }
 
-        let mut header_cells: Vec<Cell> =
-            vec![Cell::from("Host"), Cell::from("Status")];
-        let mut constraints: Vec<Constraint> =
-            vec![Constraint::Length(16), Constraint::Length(12)];
+        let mut header_cells: Vec<Cell> = vec![Cell::from("Host"), Cell::from("Status")];
+        let mut constraints: Vec<Constraint> = vec![Constraint::Length(16), Constraint::Length(12)];
         for metric in &self.checkout_columns.metrics {
             header_cells.push(Cell::from(metric_header(metric)));
             constraints.push(Constraint::Length(metric_width(metric) as u16));
@@ -1090,7 +1624,11 @@ impl App {
             let absolute_idx = start + idx;
             let is_focused = absolute_idx == self.checkout_viewport.selected;
             let prefix = if is_focused { "▶ " } else { "  " };
-            let status_text = if snap.online { "✓ online" } else { "✗ offline" };
+            let status_text = if snap.online {
+                "✓ online"
+            } else {
+                "✗ offline"
+            };
             let status_style = Style::default().fg(if snap.online {
                 self.theme.accent_checkout
             } else {
@@ -1119,9 +1657,8 @@ impl App {
             rows.push(row);
         }
 
-        let table = Table::new(rows, &constraints).header(
-            Row::new(header_cells).style(Style::default().add_modifier(Modifier::BOLD)),
-        );
+        let table = Table::new(rows, &constraints)
+            .header(Row::new(header_cells).style(Style::default().add_modifier(Modifier::BOLD)));
         frame.render_widget(table, inner);
     }
 
@@ -1162,7 +1699,14 @@ Global keys
   ?           Toggle this help
 
 Operate tab
+  ↑↓ / j k   Move between zones (OpRadio → ParamPanel → Target → Execute)
+  ← →         (on Operation row) cycle check / run / exec / sync
   f           Open Target Filter popup
+  Enter       (on ParamPanel text field) activate input
+  Enter       (on Execute button) run the selected operation
+  Space       (on checkbox field) toggle sudo / yes / keep
+  Esc         Dismiss results or cancel running operation
+  (while typing) Enter to confirm, Esc to revert
 
 Checkout tab
   ↑↓ / j k    Move row selection
@@ -1187,9 +1731,7 @@ Config tab
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.border_active))
             .title(" Keybindings (?) ");
-        let p = Paragraph::new(body)
-            .block(block)
-            .wrap(Wrap { trim: false });
+        let p = Paragraph::new(body).block(block).wrap(Wrap { trim: false });
         frame.render_widget(p, popup_area);
     }
 }

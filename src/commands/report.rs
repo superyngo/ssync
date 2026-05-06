@@ -29,6 +29,8 @@ pub enum HostStatus {
     TimedOut,
     /// Other transport / IO error during the run.
     Error,
+    /// Host was intentionally skipped (e.g. shell mismatch in `exec`).
+    Skipped,
 }
 
 /// Sink for per-host progress events emitted during a command-core run.
@@ -83,4 +85,52 @@ pub struct CheckReport {
 #[serde(tag = "command", rename_all = "lowercase")]
 pub enum CommandReport {
     Check(CheckReport),
+    Run(RunReport),
+    Exec(ExecReport),
+}
+
+// ── Run ──────────────────────────────────────────────────────────────────────
+
+/// Per-host result of a `run_core` invocation.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunHostResult {
+    pub host: String,
+    pub status: HostStatus,
+    pub duration_ms: Option<u64>,
+    /// Human-readable summary (success: truncated stdout, failure: stderr).
+    pub detail: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Typed return value of `run_core`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunReport {
+    pub executed_at: String,
+    pub command: String,
+    pub targets: Vec<String>,
+    pub hosts: Vec<RunHostResult>,
+}
+
+// ── Exec ─────────────────────────────────────────────────────────────────────
+
+/// Per-host result of an `exec_core` invocation.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecHostResult {
+    pub host: String,
+    pub status: HostStatus,
+    pub duration_ms: Option<u64>,
+    /// Human-readable summary.
+    pub detail: String,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Typed return value of `exec_core`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecReport {
+    pub executed_at: String,
+    pub script: String,
+    pub targets: Vec<String>,
+    pub hosts: Vec<ExecHostResult>,
 }

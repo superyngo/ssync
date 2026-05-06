@@ -123,12 +123,21 @@ impl ShellMode {
 #[serde(default)]
 pub struct OperateState {
     pub operation: OperationKind,
+    /// Whether to use sudo when running remote commands (Run/Exec operations).
+    pub run_sudo: bool,
+    pub run_yes: bool,
+    pub exec_sudo: bool,
+    /// Keep uploaded script on remote after execution.
+    pub exec_keep: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperationKind {
     #[default]
     Check,
+    Run,
+    Exec,
+    Sync,
 }
 
 // ---------- path computation (AD-16) ----------
@@ -149,10 +158,7 @@ fn config_hash(custom_path: Option<&Path>) -> String {
     };
     let bytes = blake3::hash(s.as_bytes());
     let h = bytes.as_bytes();
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}",
-        h[0], h[1], h[2], h[3]
-    )
+    format!("{:02x}{:02x}{:02x}{:02x}", h[0], h[1], h[2], h[3])
 }
 
 /// Full path to the TUI state file for the given config.
@@ -211,7 +217,9 @@ pub fn save(path: &Path, state: &TuiPersistedState) -> Result<()> {
     tmp.as_file_mut()
         .write_all(serialized.as_bytes())
         .context("Failed to write TUI state temp file")?;
-    tmp.as_file_mut().flush().context("Failed to flush TUI state temp file")?;
+    tmp.as_file_mut()
+        .flush()
+        .context("Failed to flush TUI state temp file")?;
     tmp.persist(path)
         .map_err(|e| e.error)
         .with_context(|| format!("Failed to persist {}", path.display()))?;
@@ -280,10 +288,13 @@ mod tests {
 
     #[test]
     fn missing_keys_load_as_defaults() {
-        let s: TuiPersistedState = toml::from_str(r#"
+        let s: TuiPersistedState = toml::from_str(
+            r#"
 [tui_state]
 active_tab = "Config"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(s.tui_state.active_tab, ActiveTab::Config);
         assert_eq!(s.target_filter.mode, TargetFilterMode::All);
     }
