@@ -1,6 +1,7 @@
 //! Tab identifiers and per-tab state.
 
 pub mod config_tab;
+pub mod operate_tab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabId {

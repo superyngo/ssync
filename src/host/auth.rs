@@ -12,6 +12,18 @@ use super::session_pool::SshHandler;
 /// Avoids re-prompting for the same key file within a single run.
 pub type PassphraseCache = HashMap<PathBuf, String>;
 
+/// A request sent from the SSH auth layer to the TUI to prompt the user for a
+/// credential (passphrase or password). The responder is a oneshot channel; the
+/// TUI sends the entered value back through it.
+#[derive(Debug)]
+pub struct SshAuthRequest {
+    pub prompt: String,
+    pub responder: tokio::sync::oneshot::Sender<String>,
+}
+
+/// Channel sender used to forward `SshAuthRequest` values to the TUI.
+pub type SshAuthSender = tokio::sync::mpsc::UnboundedSender<SshAuthRequest>;
+
 /// Attempt to authenticate `handle` as `user`.
 ///
 /// Auth chain:

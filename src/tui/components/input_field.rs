@@ -29,7 +29,7 @@ pub struct InputField {
     /// Byte-level cursor position within `value`.
     cursor_pos: usize,
     /// Snapshot saved on `Enter` (active → normal) for Esc-restore.
-    saved: String,
+    pub saved: String,
     pub mode: InputMode,
 }
 

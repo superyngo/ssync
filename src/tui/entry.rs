@@ -59,6 +59,6 @@ pub async fn run_or_fallback(verbose: bool, config_path: Option<&Path>) -> Resul
     install_panic_hook();
     let _guard = TerminalGuard::install()?;
 
-    let mut app = App::from_context(&ctx);
+    let mut app = App::from_context(&ctx, None);
     app.run().await
 }

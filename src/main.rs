@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
         None => {
             #[cfg(feature = "tui")]
             {
-                return tui::entry::run_or_fallback(cli.verbose, cfg, log_buffer).await;
+                return tui::entry::run_or_fallback(cli.verbose, cfg).await;
             }
             #[cfg(not(feature = "tui"))]
             {

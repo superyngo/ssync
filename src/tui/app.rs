@@ -446,7 +446,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
-        let auth_sender = self.auth_bridge_tx.clone();
+        let _auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
 
@@ -477,7 +477,6 @@ impl App {
                         serial,
                         timeout,
                         verbose,
-                        auth_sender,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -542,7 +541,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
-        let auth_sender = self.auth_bridge_tx.clone();
+        let _auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let sudo = self.run_sudo;
@@ -563,7 +562,7 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, false, auth_sender,
+                        cfg, cfg_path, target_mode, serial, timeout, false,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -628,7 +627,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
-        let auth_sender = self.auth_bridge_tx.clone();
+        let _auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let sudo = self.exec_sudo;
@@ -649,7 +648,7 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, false, auth_sender,
+                        cfg, cfg_path, target_mode, serial, timeout, false,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -710,7 +709,7 @@ impl App {
         let cfg = self.config.clone();
         let cfg_path = self.config_path.clone();
         let event_tx = self.event_tx.clone();
-        let auth_sender = self.auth_bridge_tx.clone();
+        let _auth_sender = self.auth_bridge_tx.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let dry_run = self.sync_dry_run;
@@ -734,7 +733,7 @@ impl App {
                 };
                 rt.block_on(async move {
                     let ctx = match Context::from_tui_parts(
-                        cfg, cfg_path, target_mode, serial, timeout, false, auth_sender,
+                        cfg, cfg_path, target_mode, serial, timeout, false,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -787,7 +786,6 @@ impl App {
                     mode: TargetMode::All,
                     serial: false,
                     verbose: false,
-                    tui_auth_sender: None,
                 };
                 if let Ok(snaps) = fetch_latest_snapshots(&tmp_ctx, &host_names) {
                     self.checkout_all_snapshots = snaps;
@@ -1094,7 +1092,7 @@ impl App {
                 self.log_overlay_open = !self.log_overlay_open;
                 if self.log_overlay_open {
                     self.log_overlay_vp = Viewport::new();
-                    let len = self.log_buffer.as_ref().map_or(0, |b| b.len());
+                    let len = self.log_buffer.as_ref().map_or(0, |b: &LogBufferHandle| b.len());
                     self.log_overlay_vp.set_dims(len, 0);
                 }
                 Ok(true)
@@ -1662,7 +1660,7 @@ impl App {
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
 
-        let buf = match &self.log_buffer {
+        let buf: &LogBufferHandle = match &self.log_buffer {
             Some(b) => b,
             None => {
                 frame.render_widget(

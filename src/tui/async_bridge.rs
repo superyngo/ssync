@@ -12,9 +12,10 @@ use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use crate::commands::report::{CommandReport, HostStatus, ProgressSink};
+use crate::host::auth::SshAuthRequest;
 
 /// Events flowing from a running operation back to the main loop.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TuiEvent {
     HostStarted(String),
     HostCompleted {
@@ -29,6 +30,8 @@ pub enum TuiEvent {
     OperationCancelled,
     /// Top-level error (target resolution, pool setup, etc).
     OperationError(String),
+    /// SSH layer is requesting a credential from the user.
+    SshAuthRequired(SshAuthRequest),
 }
 
 /// Channel capacity — covers ~500 hosts × 2 events with headroom (§18.1).
