@@ -7,10 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.9.0] - 2026-05-06
+
+### Added
+- Full TUI interface: Phase 0 through Phase 6 (scaffolding, checkout, persistence, operate, config, sync, help popup)
+- Single `ssync` binary — TUI launches when run without subcommand; `--no-tui` for headless mode
+- Arrow-key navigation: Up from top escapes to NavBar, Left/Right switches tabs
+- Config tab: inline edit, vec editor, entry form with group picker
+- Operate tab: run/exec support, check execution, progress popup
+- Sync tab: two-mode panel, checkout filter wiring
+- Focus model with adaptive arrow navigation and escape-to-parent zone resolution
+- Async operation bridge with cancellation token and host outcome tracking
+- Log overlay ring buffer for TUI diagnostics
+- CI workflow (GitHub Actions)
+- ADR: SSH auth TUI popup design
+
+### Changed
+- Unified into single binary — `ssync-tui` removed, TUI is a default feature
+- Navbar focus reset on running-op tab switch
+- Inline edit suspends global hotkeys (q, Esc) while active
+
+### Fixed
+- Resolve all clippy warnings: dead code, collapsible conditions, unnecessary unwrap, redundant closures
+- Fix build errors for clean `cargo build`
+- Vec field pressing `e` now opens entry form vec editor
+- Viewport visible_height uses 0 sentinel when opening vec editor
+- Operate tab: Up from ApplicableEntries at scroll=0 escapes to TargetRow
+- Use canonical `input_active` flag and unqualified `InputMode` in `is_editing_active`
+
 ### Docs
-- 2026-05-05: Consolidate `docs/tui_reconstruct_plan.md` into single-decision v5: resolve feature/dependency/persistence contradictions, add Architecture Decisions table, narrow MVP to Phases 0–3 (Checkout + Filter + Persistence + check), add Non-Interactive/TTY behavior, Panic-Safe Terminal (TerminalGuard + panic hook), Color Scheme, and Automated Tests sections; specify `Context::from_tui_parts` ownership rules and DB-per-task pattern; drop `persist_commands` flag.
-- 2026-05-05: Align `docs/tui_reconstruct_plan.md` v5 with current codebase (russh `SshPool`, single-binary Cargo, global `init_tracing`, `state_dir` override): add ADs for operation runtime (AD-13: reuse russh, no subprocess), command-core extraction precondition (AD-14: Phase 0.7), tracing layer wiring (AD-15: in-memory ring + reload writer), state-file path resolution (AD-16: shared state_dir + config-path hash), and `[[bin]] ssync-tui` realization (AD-17: dual `[[bin]]` + argv[0] gate); standardize exit codes (1 = TUI absent, 2 = non-TTY help); narrow Phase 1a Checkout to latest snapshots only; clarify that adaptive arrow nav stays in MVP; preserve `inject_config_comments` first-create behavior under `toml_edit` save.
-- 2026-05-05: Consistency pass on TUI plan: fix build-matrix exit code for `ssync` no-subcommand (clap help+exit 2 → eprintln+exit 1 to match AD-3/AD-17); rewrite §5 main.rs example with explicit `argv[0]` `ssync-tui` gate; strip Checkout history/since/export/detail from MVP layout, keybindings, and persisted schema (kept as Phase 6 additions in §12.4.1 + §21.B); replace stale `tui_state.toml.tmp` / `tui.log` references with hashed-filename atomic write + ring buffer; remove `TuiEvent::StdoutLine`/`StderrLine` (russh returns full output post-completion, not streamed) and add Phase 0.8 streaming-events placeholder; split §21 into MVP acceptance (§21.A) and Post-MVP acceptance table (§21.B).
+- TUI reconstruction plan v5 with architecture decisions
+- TUI navigation and bugfix plan
 
 ## [v0.8.0] - 2026-04-29
 
