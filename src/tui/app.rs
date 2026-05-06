@@ -92,7 +92,7 @@ impl AuthPopup {
 
 pub struct App {
     pub active_tab: TabId,
-    pub navbar_focused: bool,
+    navbar_focused: bool,
     pub theme: Theme,
     pub error: Option<String>,
     pub help_open: bool,
@@ -985,10 +985,12 @@ impl App {
                     return Ok(true);
                 }
                 KeyCode::Tab => {
+                    self.navbar_focused = false;
                     self.active_tab = self.active_tab.next();
                     return Ok(true);
                 }
                 KeyCode::BackTab => {
+                    self.navbar_focused = false;
                     self.active_tab = self.active_tab.prev();
                     return Ok(true);
                 }
