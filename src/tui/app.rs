@@ -5,11 +5,12 @@
 //! with red `app.error`, terminal-size guard, minimal `?` help popup,
 //! signal handlers (SIGHUP/SIGTERM on Unix, ctrl_c on Windows).
 //!
-//! Phase 4: Config tab — read-only scrollable view + external editor launch.
+//! Phase 4 (§19): Config tab 3-level read-only browser (section → entry → field)
+//! + external editor 4-stage flow (§7.4) with config_mtime change detection.
 
-use std::io;
+use std::io::{self, Write as _};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -41,6 +42,7 @@ use super::components::viewport::Viewport;
 use super::state::persist::{
     self, ActiveTab, TargetFilterMode, TargetFilterState, TuiPersistedState,
 };
+use super::tabs::config_tab::ConfigTabState;
 use super::tabs::TabId;
 use super::theme::Theme;
 
@@ -67,9 +69,12 @@ pub struct App {
     pub checkout_columns: DisplayColumns,
     pub config: AppConfig,
     pub config_path: Option<PathBuf>,
-    /// Raw lines of the config file for the Config tab display.
-    config_lines: Vec<String>,
-    config_viewport: Viewport,
+    /// 3-level Config tab browser state (Phase 4).
+    config_tab: ConfigTabState,
+    /// Set by `handle_key` when `E` is pressed; drained by `run()` after each event.
+    needs_editor_open: bool,
+    /// Until this instant the Config tab shows a yellow "Config reloaded" banner.
+    config_reload_banner_until: Option<Instant>,
     pub state_file_path: PathBuf,
     pub target_filter: TargetFilterState,
     pub filter_popup: Option<FilterPopup>,
@@ -117,9 +122,7 @@ impl App {
 
         let active_tab = persisted.tui_state.active_tab.to_tab_id();
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let config_lines = load_config_lines(ctx.config_path.as_deref());
-        let mut config_viewport = Viewport::new();
-        config_viewport.set_dims(config_lines.len(), 0);
+        let config_tab = ConfigTabState::new(&ctx.config, ctx.config_path.as_deref());
         let timeout = if persisted.target_filter.timeout > 0 {
             persisted.target_filter.timeout
         } else {
@@ -138,8 +141,9 @@ impl App {
             checkout_columns: columns,
             config: ctx.config.clone(),
             config_path: ctx.config_path.clone(),
-            config_lines,
-            config_viewport,
+            config_tab,
+            needs_editor_open: false,
+            config_reload_banner_until: None,
             state_file_path,
             target_filter: persisted.target_filter,
             filter_popup: None,
@@ -217,6 +221,21 @@ impl App {
             if event::poll(Duration::from_millis(POLL_INTERVAL_MS))? {
                 let ev = event::read()?;
                 if self.handle_event(ev)? {
+                    dirty = true;
+                }
+            }
+
+            // Open external editor if requested (§7.4 4-stage flow).
+            if self.needs_editor_open {
+                self.needs_editor_open = false;
+                self.do_open_editor(&mut terminal)?;
+                dirty = true;
+            }
+
+            // Expire the "Config reloaded" banner so it disappears after 2s.
+            if let Some(until) = self.config_reload_banner_until {
+                if Instant::now() >= until {
+                    self.config_reload_banner_until = None;
                     dirty = true;
                 }
             }
@@ -485,6 +504,7 @@ impl App {
         }
 
         match key.code {
+            // ── Global keys (always first; work from any tab) ──────────────
             KeyCode::Char('q') => {
                 self.should_quit = true;
                 Ok(true)
@@ -496,62 +516,6 @@ impl App {
             KeyCode::Char('i') => {
                 self.info_open = true;
                 Ok(true)
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Config => {
-                self.config_viewport.move_up();
-                Ok(true)
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Config => {
-                self.config_viewport.move_down();
-                Ok(true)
-            }
-            KeyCode::PageUp if self.active_tab == TabId::Config => {
-                self.config_viewport.page_up();
-                Ok(true)
-            }
-            KeyCode::PageDown if self.active_tab == TabId::Config => {
-                self.config_viewport.page_down();
-                Ok(true)
-            }
-            KeyCode::Home if self.active_tab == TabId::Config => {
-                self.config_viewport.home();
-                Ok(true)
-            }
-            KeyCode::End if self.active_tab == TabId::Config => {
-                self.config_viewport.end();
-                Ok(true)
-            }
-            KeyCode::Char('e') if self.active_tab == TabId::Config => {
-                self.open_in_editor();
-                Ok(true)
-            }
-            KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Operate => {
-                self.operate_focus = OperateFocus::TargetRow;
-                Ok(true)
-            }
-            KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Operate => {
-                self.operate_focus = OperateFocus::Execute;
-                Ok(true)
-            }
-            KeyCode::Enter
-                if self.active_tab == TabId::Operate
-                    && self.operate_focus == OperateFocus::Execute =>
-            {
-                Ok(self.execute_check())
-            }
-            KeyCode::Char('f') => {
-                // Operate-tab-only per §13 / Phase 2 plan; Checkout filter
-                // wiring lands in Phase 6. For now, only Operate opens it.
-                if self.active_tab == TabId::Operate {
-                    let popup = FilterPopup::new(
-                        self.target_filter.clone(),
-                        true, // allow_shell on Operate
-                        &self.config,
-                    );
-                    self.filter_popup = Some(popup);
-                    return Ok(true);
-                }
-                Ok(false)
             }
             KeyCode::Esc => {
                 if self.error.is_some() {
@@ -572,14 +536,62 @@ impl App {
                 self.active_tab = TabId::Checkout;
                 Ok(true)
             }
-            KeyCode::Tab => {
+            // Tab/BackTab on Config tab cycle zones (§8.2); on other tabs
+            // cycle the tab bar.
+            KeyCode::Tab if self.active_tab != TabId::Config => {
                 self.active_tab = self.active_tab.next();
                 Ok(true)
             }
-            KeyCode::BackTab => {
+            KeyCode::BackTab if self.active_tab != TabId::Config => {
                 self.active_tab = self.active_tab.prev();
                 Ok(true)
             }
+
+            // ── Config tab (§8.6, §12.2, Phase 4) ─────────────────────────
+            // E opens external editor (§7.4 4-stage flow).
+            KeyCode::Char('E') if self.active_tab == TabId::Config => {
+                if self.running_op.is_some() {
+                    self.error =
+                        Some("Cannot edit config while an operation is running.".to_string());
+                } else if self.config_path.is_none() {
+                    self.error =
+                        Some("No config path set — cannot open editor.".to_string());
+                } else {
+                    self.needs_editor_open = true;
+                }
+                Ok(true)
+            }
+            // All other Config tab keys routed to ConfigTabState.
+            _ if self.active_tab == TabId::Config => {
+                Ok(self.config_tab.handle_key(key, &self.config))
+            }
+
+            // ── Operate tab ────────────────────────────────────────────────
+            KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Operate => {
+                self.operate_focus = OperateFocus::TargetRow;
+                Ok(true)
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.active_tab == TabId::Operate => {
+                self.operate_focus = OperateFocus::Execute;
+                Ok(true)
+            }
+            KeyCode::Enter
+                if self.active_tab == TabId::Operate
+                    && self.operate_focus == OperateFocus::Execute =>
+            {
+                Ok(self.execute_check())
+            }
+            KeyCode::Char('f') if self.active_tab == TabId::Operate => {
+                let popup = FilterPopup::new(
+                    self.target_filter.clone(),
+                    true,
+                    &self.config,
+                );
+                self.filter_popup = Some(popup);
+                Ok(true)
+            }
+
+            // ── Checkout tab ───────────────────────────────────────────────
             KeyCode::Up | KeyCode::Char('k') if self.active_tab == TabId::Checkout => {
                 self.checkout_viewport.move_up();
                 Ok(true)
@@ -604,6 +616,7 @@ impl App {
                 self.checkout_viewport.end();
                 Ok(true)
             }
+
             _ => Ok(false),
         }
     }
@@ -680,85 +693,88 @@ impl App {
     }
 
     fn render_config(&mut self, area: Rect, frame: &mut ratatui::Frame) {
-        let path_display = self
-            .config_path
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~/.config/ssync/config.toml".to_string());
-        let title = format!(" Config — {}  (e:edit) ", path_display);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.accent_config))
-            .title(title);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        if self.config_lines.is_empty() {
-            let p = Paragraph::new("Config file not found or empty.")
-                .style(Style::default().fg(self.theme.inactive))
-                .wrap(Wrap { trim: false });
-            frame.render_widget(p, inner);
-            return;
-        }
-
-        let visible_height = inner.height as usize;
-        self.config_viewport.set_dims(self.config_lines.len(), visible_height);
-
-        let (start, end) = self.config_viewport.visible_range();
-        let line_num_width = format!("{}", self.config_lines.len()).len();
-        let lines: Vec<Line> = self.config_lines[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, raw)| {
-                let lineno = start + i + 1;
-                Line::from(vec![
-                    Span::styled(
-                        format!("{:>width$} ", lineno, width = line_num_width),
-                        Style::default().fg(self.theme.inactive),
-                    ),
-                    Span::raw(raw.clone()),
-                ])
-            })
-            .collect();
-        let p = Paragraph::new(lines);
-        frame.render_widget(p, inner);
+        let banner_until = self.config_reload_banner_until;
+        self.config_tab.render(
+            area,
+            frame,
+            &self.theme,
+            &self.config,
+            self.config_path.as_deref(),
+            banner_until,
+        );
     }
 
-    /// Suspend the TUI, open the config file in `$EDITOR` (or `vi`), then
-    /// resume the TUI and reload the config lines.
-    fn open_in_editor(&mut self) {
-        if self.running_op.is_some() {
-            self.error = Some("Cannot edit config while an operation is running.".to_string());
-            return;
-        }
-        let Some(path) = self.config_path.clone() else {
-            self.error = Some("No config path set — cannot open editor.".to_string());
-            return;
+    /// §7.4 external editor 4-stage flow.
+    ///
+    /// Called from `run()` when `needs_editor_open` is set — giving access to
+    /// the `Terminal` object needed for `terminal.clear()` after restore.
+    fn do_open_editor(
+        &mut self,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
+    ) -> Result<()> {
+        let path = match &self.config_path {
+            Some(p) => p.clone(),
+            None => return Ok(()),
         };
-        let editor = std::env::var("EDITOR")
-            .or_else(|_| std::env::var("VISUAL"))
-            .unwrap_or_else(|_| "vi".to_string());
 
-        // Suspend: leave alternate screen and disable raw mode.
+        // Resolve editor: $VISUAL → $EDITOR → platform default.
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| {
+                if cfg!(windows) {
+                    "notepad".to_string()
+                } else {
+                    "vi".to_string()
+                }
+            });
+
+        // Stage 1 — PAUSE: leave alternate screen + disable raw mode.
         let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
+        let _ = io::stdout().flush();
 
+        // Stage 2 — EXECUTE.
         let status = std::process::Command::new(&editor).arg(&path).status();
-        if let Err(e) = &status {
-            // Resume first, then surface the error.
-            let _ = terminal::enable_raw_mode();
-            let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
-            self.error = Some(format!("Failed to launch editor '{}': {}", editor, e));
-            return;
-        }
 
-        // Resume TUI.
+        // Stage 3 — RESTORE: re-enter alternate screen.
         let _ = terminal::enable_raw_mode();
         let _ = execute!(io::stdout(), terminal::EnterAlternateScreen);
+        terminal.clear()?;
 
-        // Reload config lines from disk.
-        self.config_lines = load_config_lines(Some(&path));
-        self.config_viewport.set_dims(self.config_lines.len(), 0);
+        if let Err(e) = &status {
+            self.error = Some(format!("Failed to launch '{editor}': {e}"));
+            return Ok(());
+        }
+
+        // Detect mtime change and reload config if file was modified.
+        let new_mtime = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok();
+
+        let should_reload = match (self.config_tab.config_mtime, new_mtime) {
+            (Some(old), Some(new)) => old != new,
+            // On Windows mtime granularity is 2s; also treat a successful exit as reload signal.
+            _ => status.map(|s| s.success()).unwrap_or(false),
+        };
+
+        if should_reload {
+            match crate::config::app::load(Some(&path)) {
+                Ok(Some(new_config)) => {
+                    self.config = new_config;
+                    self.config_tab.reload(&self.config, Some(&path));
+                    self.config_reload_banner_until =
+                        Some(Instant::now() + Duration::from_secs(2));
+                }
+                Ok(None) => {
+                    self.error = Some("Config file disappeared after editor exit.".to_string());
+                }
+                Err(e) => {
+                    self.error = Some(format!("Config reload failed: {e}"));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn render_operate(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -1013,8 +1029,17 @@ impl App {
             ),
             TabId::Checkout => "Checkout tab\n\nLatest snapshot per host. Use ↑↓/jk/PgUp/PgDn/Home/End to scroll.\nData refreshes automatically after each `check` run from Operate.".to_string(),
             TabId::Config => format!(
-                "Config tab\n\nShows the raw config file (read-only). Use ↑↓/jk/PgUp/PgDn/Home/End to scroll.\nPress `e` to open the file in $EDITOR — the TUI suspends and resumes when you exit.\n\nConfig path: {}",
-                self.config_path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(default)".to_string())
+                "Config tab (read-only browser)\n\n\
+                 Sidebar: ↑↓ / jk to move between sections and entries.\n\
+                 Field table: → or Tab to enter, ← to return to sidebar.\n\
+                 Within each pane: ↑↓ / jk / PgUp / PgDn / Home / End.\n\n\
+                 E  — open config in $VISUAL / $EDITOR / vi (TUI suspends,\n\
+                      resumes after exit; config reloads if file was changed).\n\n\
+                 Config path: {}",
+                self.config_path
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(default — ~/.config/ssync/config.toml)".to_string())
             ),
         };
         let block = Block::default()
@@ -1112,7 +1137,7 @@ impl App {
         }
 
         let hints = match self.active_tab {
-            TabId::Config => "↑↓/jk:Scroll  PgUp/PgDn  Home/End  e:Edit  Tab:Cycle  ?:Help  q:Quit",
+            TabId::Config => "↑↓/jk:Rows  ←→:Zones  E:EditInEditor  1/2/3:Tabs  ?:Help  q:Quit",
             TabId::Operate => "1/2/3:Tabs  Tab:Cycle  f:Filter  ?:Help  q:Quit",
             TabId::Checkout => "↑↓/jk:Rows  PgUp/PgDn  Home/End  Tab:Cycle  ?:Help  q:Quit",
         };
@@ -1151,10 +1176,12 @@ Filter popup
   Esc                Cancel
 
 Config tab
-  ↑↓ / j k    Scroll
+  ↑↓ / j k    Move sidebar / field rows
+  ← / →       Switch zones (Sidebar ↔ FieldTable)
+  Tab         Switch zone (Sidebar → FieldTable)
   PgUp/PgDn   Page navigation
   Home/End    Jump to top / bottom
-  e           Open config in $EDITOR (TUI suspends while editor runs)
+  E           Open config in $VISUAL/$EDITOR (TUI suspends, reloads on change)
 ";
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1164,22 +1191,6 @@ Config tab
             .block(block)
             .wrap(Wrap { trim: false });
         frame.render_widget(p, popup_area);
-    }
-}
-
-/// Read the config file at `path` (or the default config path) into lines.
-/// Returns an empty Vec if the file cannot be read.
-fn load_config_lines(path: Option<&std::path::Path>) -> Vec<String> {
-    let resolved = match path {
-        Some(p) => p.to_path_buf(),
-        None => match crate::config::app::config_path() {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        },
-    };
-    match std::fs::read_to_string(&resolved) {
-        Ok(text) => text.lines().map(|l| l.to_string()).collect(),
-        Err(_) => Vec::new(),
     }
 }
 

@@ -4,7 +4,7 @@
 
 ### 2026-05-06
 
-- **feat(tui): Phase 4 — Config tab read-only view + external editor** (`e` opens `$EDITOR`/`$VISUAL`/`vi`; TUI suspends and resumes after exit; config file reloads on return). Scrollable via ↑↓/jk/PgUp/PgDn/Home/End with line numbers.
+- **feat(tui): Phase 4 — Config tab 3-level read-only browser + external editor** (§19, §7.4, §8.6, §12.2). Sidebar (Settings / Hosts / Checks / Syncs) ↔ FieldTable via ←→; breadcrumb tracks section → entry → field. `E` triggers full 4-stage suspend/resume flow (`$VISUAL`→`$EDITOR`→vi/notepad); `config_mtime` detects file changes and triggers reload + 2s yellow "Config reloaded" banner.
 
 ## v0.8.0 (2026-04-29)
 

@@ -50,22 +50,30 @@ cargo build --bin ssync-tui --features tui         # TUI build
 > is not supported; they share a single state file with last-write-wins
 > semantics.
 
-## TUI keybindings (Phase 3 / MVP)
+## TUI keybindings (Phase 4)
 
 | Scope | Key | Action |
 |-------|-----|--------|
 | Global | `1` / `2` / `3` | Switch to Config / Operate / Checkout |
-| Global | `Tab` / `Shift+Tab` | Cycle to next / previous tab |
 | Global | `q` | Quit (state saved) |
 | Global | `Ctrl+C` | Quit immediately (state saved; cancels running op) |
 | Global | `Esc` | Close popup / clear error / cancel running op |
 | Global | `?` | Toggle keybindings help popup |
 | Global | `i` | Toggle contextual info popup |
+| Config | `↑` `↓` `j` `k` | Move within sidebar or field table |
+| Config | `←` / `→` | Switch zones: Sidebar ↔ FieldTable |
+| Config | `Tab` | Sidebar → FieldTable (within Config tab only) |
+| Config | `PgUp` `PgDn` `Home` `End` | Page / jump navigation |
+| Config | `E` | Open config file in `$VISUAL` / `$EDITOR` / `vi` — TUI suspends and resumes; config reloads if the file was modified |
 | Operate | `↑` / `↓` (or `j`/`k`) | Move between Target row and `[Execute]` |
 | Operate | `f` | Open Target Filter popup |
 | Operate | `Enter` on `[Execute]` | Run the `check` operation |
+| Operate | `Tab` / `Shift+Tab` | Cycle tabs (Operate and Checkout only) |
 | Checkout | `↑` `↓` `j` `k` | Move row selection |
 | Checkout | `PgUp` `PgDn` `Home` `End` | Page / jump navigation |
+| Checkout | `Tab` / `Shift+Tab` | Cycle tabs |
+
+> **Note:** On the Config tab, `Tab` switches between the Sidebar and FieldTable zones rather than cycling to the next tab. Use `1` / `2` / `3` to switch tabs from Config.
 
 ## Usage
 
