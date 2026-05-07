@@ -216,7 +216,7 @@ impl App {
             state_file_path,
             target_filter: persisted.target_filter,
             filter_popup: None,
-            operate_focus: OperateFocus::Execute,
+            operate_focus: OperateFocus::OpRadio,
             operate_operation: persisted.operate.operation,
             run_command: InputField::new(""),
             exec_script: InputField::new(""),
@@ -262,6 +262,43 @@ impl App {
             OperationKind::Sync => self.config.sync.len(),
             _ => 0,
         }
+    }
+
+    fn tab_cycle_operate(&mut self, forward: bool) {
+        let all_zones: &[OperateFocus] = if self.has_entries_panel() {
+            &[
+                OperateFocus::OpRadio,
+                OperateFocus::ParamPanel,
+                OperateFocus::TargetRow,
+                OperateFocus::ApplicableEntries,
+                OperateFocus::Execute,
+            ]
+        } else {
+            &[
+                OperateFocus::OpRadio,
+                OperateFocus::ParamPanel,
+                OperateFocus::TargetRow,
+                OperateFocus::Execute,
+            ]
+        };
+        let effective: Vec<OperateFocus> = all_zones
+            .iter()
+            .copied()
+            .filter(|z| {
+                !(*z == OperateFocus::ParamPanel
+                    && self.operate_operation == OperationKind::Check)
+            })
+            .collect();
+        let pos = effective
+            .iter()
+            .position(|z| *z == self.operate_focus)
+            .unwrap_or(0);
+        let next_pos = if forward {
+            (pos + 1) % effective.len()
+        } else {
+            (pos + effective.len() - 1) % effective.len()
+        };
+        self.operate_focus = effective[next_pos];
     }
 
     fn save_state(&self) {
@@ -1106,6 +1143,19 @@ impl App {
                     self.error = None;
                     return Ok(true);
                 }
+                // Entry form must handle Esc before the global NavBar escape below.
+                if self.active_tab == TabId::Config
+                    && (self.config_tab.entry_form.is_some()
+                        || self.config_tab.confirm.is_some())
+                {
+                    let handled = self.config_tab.handle_key(key, &mut self.config);
+                    return Ok(handled);
+                }
+                // Any other position: Esc jumps focus to NavBar.
+                if !self.navbar_focused {
+                    self.navbar_focused = true;
+                    return Ok(true);
+                }
                 Ok(false)
             }
             KeyCode::Char('1') => {
@@ -1135,14 +1185,112 @@ impl App {
                 self.active_tab = TabId::Checkout;
                 Ok(true)
             }
-            // Tab/BackTab on Config tab cycle zones (§8.2); on other tabs
-            // cycle the tab bar.
-            KeyCode::Tab if self.active_tab != TabId::Config => {
-                self.active_tab = self.active_tab.next();
-                Ok(true)
-            }
-            KeyCode::BackTab if self.active_tab != TabId::Config => {
-                self.active_tab = self.active_tab.prev();
+            // Tab/BackTab: context-aware cycling within the focused layer.
+            KeyCode::Tab | KeyCode::BackTab => {
+                let forward = key.code == KeyCode::Tab;
+                if self.navbar_focused {
+                    self.active_tab = if forward {
+                        self.active_tab.next()
+                    } else {
+                        self.active_tab.prev()
+                    };
+                    self.navbar_focused = false;
+                } else {
+                    match self.active_tab {
+                        TabId::Config => {
+                            match self.config_tab.zone {
+                                ConfigZone::Sidebar => {
+                                    let count = self.config_tab.items.len();
+                                    if count > 0 {
+                                        if forward {
+                                            let sel = self.config_tab.sidebar_vp.selected;
+                                            if sel + 1 >= count {
+                                                self.config_tab.sidebar_vp.home();
+                                            } else {
+                                                self.config_tab.sidebar_vp.move_down();
+                                            }
+                                        } else {
+                                            let sel = self.config_tab.sidebar_vp.selected;
+                                            if sel == 0 {
+                                                self.config_tab.sidebar_vp.end();
+                                            } else {
+                                                self.config_tab.sidebar_vp.move_up();
+                                            }
+                                        }
+                                        self.config_tab.reset_field_vp(&self.config);
+                                    }
+                                }
+                                ConfigZone::FieldTable => {
+                                    let count =
+                                        self.config_tab.current_descriptors(&self.config).len();
+                                    if count > 0 {
+                                        if forward {
+                                            let sel = self.config_tab.field_vp.selected;
+                                            if sel + 1 >= count {
+                                                self.config_tab.field_vp.home();
+                                            } else {
+                                                self.config_tab.field_vp.move_down();
+                                            }
+                                        } else {
+                                            let sel = self.config_tab.field_vp.selected;
+                                            if sel == 0 {
+                                                self.config_tab.field_vp.set_dims(
+                                                    count,
+                                                    self.config_tab.field_vp.visible_height,
+                                                );
+                                                self.config_tab.field_vp.end();
+                                            } else {
+                                                self.config_tab.field_vp.move_up();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        TabId::Operate => {
+                            if self.operate_focus == OperateFocus::OpRadio {
+                                self.operate_operation = if forward {
+                                    match self.operate_operation {
+                                        OperationKind::Check => OperationKind::Run,
+                                        OperationKind::Run => OperationKind::Exec,
+                                        OperationKind::Exec => OperationKind::Sync,
+                                        OperationKind::Sync => OperationKind::Check,
+                                    }
+                                } else {
+                                    match self.operate_operation {
+                                        OperationKind::Check => OperationKind::Sync,
+                                        OperationKind::Run => OperationKind::Check,
+                                        OperationKind::Exec => OperationKind::Run,
+                                        OperationKind::Sync => OperationKind::Exec,
+                                    }
+                                };
+                                self.save_state();
+                            } else {
+                                self.tab_cycle_operate(forward);
+                            }
+                        }
+                        TabId::Checkout => {
+                            let count = self.checkout_viewport.item_count;
+                            if count > 0 {
+                                if forward {
+                                    let sel = self.checkout_viewport.selected;
+                                    if sel + 1 >= count {
+                                        self.checkout_viewport.home();
+                                    } else {
+                                        self.checkout_viewport.move_down();
+                                    }
+                                } else {
+                                    let sel = self.checkout_viewport.selected;
+                                    if sel == 0 {
+                                        self.checkout_viewport.end();
+                                    } else {
+                                        self.checkout_viewport.move_up();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(true)
             }
 
@@ -1172,7 +1320,11 @@ impl App {
                 Ok(true)
             }
             // 'a' adds a new entry (Phase 7 Case B).
-            KeyCode::Char('a') if self.active_tab == TabId::Config => {
+            KeyCode::Char('a')
+                if self.active_tab == TabId::Config
+                    && self.config_tab.entry_form.is_none()
+                    && self.config_tab.confirm.is_none() =>
+            {
                 let kind = self.config_add_kind();
                 if let Some(kind) = kind {
                     self.config_tab.start_add_entry(kind);
@@ -1180,19 +1332,39 @@ impl App {
                 Ok(true)
             }
             // 'd' deletes focused entry (Phase 7).
-            KeyCode::Char('d') if self.active_tab == TabId::Config => {
-                if self.config_tab.confirm.is_some() {
-                    // Confirm dialog handles 'y'/'n'; 'd' is not consumed here.
-                    return Ok(false);
-                }
+            KeyCode::Char('d')
+                if self.active_tab == TabId::Config
+                    && self.config_tab.entry_form.is_none()
+                    && self.config_tab.confirm.is_none() =>
+            {
                 self.config_tab.request_delete();
                 Ok(true)
+            }
+            // Absorb all keys while entry form or confirm dialog is open.
+            _ if self.active_tab == TabId::Config
+                && (self.config_tab.entry_form.is_some()
+                    || self.config_tab.confirm.is_some()) =>
+            {
+                self.config_tab.handle_key(key, &mut self.config);
+                if let Some((kind, index)) = self.config_tab.pending_delete.take() {
+                    self.config_tab.execute_delete(&mut self.config, kind, index);
+                }
+                Ok(true) // always consume — don't leak to global 'q'/etc.
             }
             // Up at top of Config Sidebar escapes to NavBar.
             KeyCode::Up | KeyCode::Char('k')
                 if self.active_tab == TabId::Config
                     && self.config_tab.zone == ConfigZone::Sidebar
                     && self.config_tab.sidebar_vp.selected == 0 =>
+            {
+                self.navbar_focused = true;
+                Ok(true)
+            }
+            // Up at top of Config FieldTable also escapes to NavBar.
+            KeyCode::Up | KeyCode::Char('k')
+                if self.active_tab == TabId::Config
+                    && self.config_tab.zone == ConfigZone::FieldTable
+                    && self.config_tab.field_vp_at_top() =>
             {
                 self.navbar_focused = true;
                 Ok(true)
@@ -1565,8 +1737,18 @@ impl App {
                 .fg(accent)
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
         };
+        let block_border_style = if self.navbar_focused {
+            Style::default().fg(accent)
+        } else {
+            Style::default().fg(self.theme.border_inactive)
+        };
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title(" ssync "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" ssync ")
+                    .border_style(block_border_style),
+            )
             .select(selected)
             .style(Style::default().fg(self.theme.inactive))
             .highlight_style(highlight);

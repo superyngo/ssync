@@ -288,7 +288,7 @@ pub struct ConfigTabState {
     pub zone: ConfigZone,
     pub items: Vec<SidebarItem>,
     pub sidebar_vp: Viewport,
-    field_vp: Viewport,
+    pub field_vp: Viewport,
     pub reload_banner_until: Option<Instant>,
     pub config_mtime: Option<std::time::SystemTime>,
     pub config_dirty: bool,
@@ -436,6 +436,11 @@ impl ConfigTabState {
                 }
             }
         }
+    }
+
+    /// Returns true when the FieldTable zone cursor is at the first row.
+    pub fn field_vp_at_top(&self) -> bool {
+        self.field_vp.selected == 0
     }
 
     /// Returns true when a text input is currently active in the config tab
@@ -622,7 +627,7 @@ impl ConfigTabState {
     ) -> bool {
         if input.mode == InputMode::Active {
             input.handle_key(key);
-            if input.mode == InputMode::Normal && input.value != input.saved {
+            if input.mode == InputMode::Normal {
                 self.commit_inline_edit(&input.value, config);
                 self.config_dirty = true;
             }
@@ -727,10 +732,8 @@ impl ConfigTabState {
             form.input.handle_key(key);
             if form.input.mode == InputMode::Normal {
                 let idx = form.active_input.unwrap();
-                if form.input.value != form.input.saved {
-                    form.fields[idx].display_value = form.input.value.clone();
-                    form.dirty = true;
-                }
+                form.fields[idx].display_value = form.input.value.clone();
+                form.dirty = true;
                 form.active_input = None;
             }
             return true;
@@ -1508,13 +1511,13 @@ impl ConfigTabState {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    fn reset_field_vp(&mut self, config: &AppConfig) {
+    pub fn reset_field_vp(&mut self, config: &AppConfig) {
         let count = self.current_descriptors(config).len();
         self.field_vp = Viewport::new();
         self.field_vp.set_dims(count, 0);
     }
 
-    fn current_descriptors(&self, config: &AppConfig) -> Vec<FieldDescriptor> {
+    pub fn current_descriptors(&self, config: &AppConfig) -> Vec<FieldDescriptor> {
         match self.items.get(self.sidebar_vp.selected) {
             None => vec![],
             Some(SidebarItem::SectionSettings) => settings_descriptors(&config.settings),
